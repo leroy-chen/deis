@@ -15,8 +15,10 @@ Using Deis
     install-client
     register-user
     deploy-application
+    process-types
     using-buildpacks
     using-dockerfiles
     using-docker-images
     config-application
     manage-application
+    app-ssl

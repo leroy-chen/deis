@@ -17,6 +17,11 @@
       "Description": "Number of nodes in cluster (3-12).",
       "Type": "Number"
     },
+    "IamInstanceProfile" : {
+      "Description" : "(Optional) Set IAM instance profile for Deis hosts (default: none)",
+      "Type" : "String",
+      "Default": ""
+    },
     "SSHFrom" : {
       "Description" : "Lockdown SSH access to the Deis hosts (default: can be accessed from anywhere)",
       "Type" : "String",
@@ -43,6 +48,11 @@
         "c3.2xlarge",
         "c3.4xlarge",
         "c3.8xlarge",
+        "c4.large",
+        "c4.xlarge",
+        "c4.2xlarge",
+        "c4.4xlarge",
+        "c4.8xlarge",
         "c1.medium",
         "c1.xlarge",
         "cc2.8xlarge",
@@ -73,26 +83,56 @@
       "AllowedValues" : [ "PV", "HVM" ],
       "ConstraintDescription" : "must be either PV or HVM"
     },
+    "EC2EBSVolumeType" : {
+      "Description" : "EC2 EBS VolumeType",
+      "Type": "String",
+      "Default": "gp2",
+      "AllowedValues" : [ "gp2", "standard" ],
+      "ConstraintDescription" : "must be either 'gp2' for SSD or 'standard' for magnetic (provisioned iOPS requires further manual changes)"
+    },
     "AssociatePublicIP": {
       "Description": "Whether to associate a public IP address to the instances",
       "Type": "String",
       "Default": "true",
       "AllowedValues" : [ "true", "false" ],
       "ConstraintDescription" : "must be either true or false"
+    },
+    "ELBScheme": {
+      "Description": "Whether to create an internal-only load balancer, or a public-facing one (default)",
+      "Type": "String",
+      "Default": "internet-facing",
+      "AllowedValues" : [ "internet-facing", "internal" ],
+      "ConstraintDescription" : "must be either 'internet-facing' for public use, or 'internal' for private use"
+    },
+    "RootVolumeSize": {
+      "Description": "Desired size of the root volume, in GB",
+      "Type": "Number",
+      "Default": "50"
+    },
+    "DockerVolumeSize": {
+      "Description": "Desired size of the Docker volume, in GB",
+      "Type": "Number",
+      "Default": "100"
+    },
+    "EtcdVolumeSize": {
+      "Description": "Desired size of the etcd volume, in GB",
+      "Type": "Number",
+      "Default": "10"
     }
   },
 
   "Mappings" : {
     "CoreOSAMIs" : {
-      "eu-central-1"   : { "PV" : "ami-0cae9811", "HVM" : "ami-12ae980f" },
-      "ap-northeast-1" : { "PV" : "ami-9f60599e", "HVM" : "ami-9d60599c" },
-      "sa-east-1"      : { "PV" : "ami-21ca7c3c", "HVM" : "ami-23ca7c3e" },
-      "ap-southeast-2" : { "PV" : "ami-adb9d697", "HVM" : "ami-afb9d695" },
-      "ap-southeast-1" : { "PV" : "ami-0eebc85c", "HVM" : "ami-0cebc85e" },
-      "us-east-1"      : { "PV" : "ami-30058d58", "HVM" : "ami-3e058d56" },
-      "us-west-2"      : { "PV" : "ami-b34f0483", "HVM" : "ami-b14f0481" },
-      "us-west-1"      : { "PV" : "ami-ff7264ba", "HVM" : "ami-f97264bc" },
-      "eu-west-1"      : { "PV" : "ami-1e47f269", "HVM" : "ami-1c47f26b" }
+      "eu-central-1"   : { "PV" : "ami-fe6b52e3", "HVM" : "ami-f86b52e5" },
+      "ap-northeast-1" : { "PV" : "ami-9ec1119e", "HVM" : "ami-9cc1119c" },
+      "us-gov-west-1"  : { "PV" : "ami-854828a6", "HVM" : "ami-874828a4" },
+      "sa-east-1"      : { "PV" : "ami-d9b839c4", "HVM" : "ami-d5b839c8" },
+      "ap-southeast-2" : { "PV" : "ami-7985fc43", "HVM" : "ami-7b85fc41" },
+      "ap-southeast-1" : { "PV" : "ami-d4033b86", "HVM" : "ami-da033b88" },
+      "us-east-1"      : { "PV" : "ami-c16583aa", "HVM" : "ami-c36583a8" },
+      "us-west-2"      : { "PV" : "ami-995f60a9", "HVM" : "ami-975f60a7" },
+      "us-west-1"      : { "PV" : "ami-877a92c3", "HVM" : "ami-857a92c1" },
+      "eu-west-1"      : { "PV" : "ami-e38cfc94", "HVM" : "ami-e18cfc96" }
 
     },
     "RootDevices" : {
@@ -103,6 +143,17 @@
       "VPC"     : { "CIDR" : "10.21.0.0/16" },
       "Subnet1" : { "CIDR" : "10.21.1.0/24" },
       "Subnet2" : { "CIDR" : "10.21.2.0/24" }
+    }
+  },
+
+  "Conditions" : {
+    "UseIamInstanceProfile" : {
+      "Fn::Not" : [{
+        "Fn::Equals" : [
+          { "Ref" : "IamInstanceProfile" },
+           ""
+        ]
+      }]
     }
   },
 
@@ -221,6 +272,13 @@
       "Properties": {
         "ImageId" : { "Fn::FindInMap" : [ "CoreOSAMIs", { "Ref" : "AWS::Region" }, { "Ref" : "EC2VirtualizationType" }]},
         "InstanceType": {"Ref": "InstanceType"},
+        "IamInstanceProfile" : {
+          "Fn::If" : [
+            "UseIamInstanceProfile",
+            { "Ref" : "IamInstanceProfile" },
+            { "Ref" : "AWS::NoValue" }
+          ]
+        },
         "KeyName": {"Ref": "KeyPair"},
         "UserData" : { "Fn::Base64": { "Fn::Join": [ "", [ ] ] } },
         "AssociatePublicIpAddress": {"Ref": "AssociatePublicIP"},
@@ -228,7 +286,15 @@
         "BlockDeviceMappings" : [
           {
             "DeviceName" : { "Fn::FindInMap": [ "RootDevices", { "Ref": "EC2VirtualizationType" }, "Name" ] },
-            "Ebs" : { "VolumeSize" : "100" }
+            "Ebs" : { "VolumeSize" : { "Ref": "RootVolumeSize" }, "VolumeType": { "Ref": "EC2EBSVolumeType" } }
+          },
+          {
+            "DeviceName" : "/dev/xvdf",
+            "Ebs" : { "VolumeSize" : { "Ref": "DockerVolumeSize" }, "VolumeType": { "Ref": "EC2EBSVolumeType" } }
+          },
+          {
+            "DeviceName" : "/dev/xvdg",
+            "Ebs" : { "VolumeSize" : { "Ref": "EtcdVolumeSize" }, "VolumeType": { "Ref": "EC2EBSVolumeType" } }
           }
         ]
       }
@@ -237,10 +303,11 @@
       "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
       "DependsOn" : "GatewayToInternet",
       "Properties": {
+        "Scheme" : {"Ref": "ELBScheme"},
         "HealthCheck": {
           "HealthyThreshold": "4",
           "Interval": "15",
-          "Target": "HTTP:80/health-check",
+          "Target": "TCP:80",
           "Timeout": "5",
           "UnhealthyThreshold": "2"
         },
@@ -248,12 +315,27 @@
           { "Ref" : "Subnet1" },
           { "Ref" : "Subnet2" }
         ],
+        "Policies" : [{
+           "PolicyName" : "EnableProxyProtocol",
+           "PolicyType" : "ProxyProtocolPolicyType",
+           "Attributes" : [{
+              "Name"  : "ProxyProtocol",
+              "Value" : "true"
+           }],
+           "InstancePorts" : ["80", "443"]
+        }],
         "Listeners": [
           {
             "InstancePort": "80",
-            "InstanceProtocol": "HTTP",
+            "InstanceProtocol": "TCP",
             "LoadBalancerPort": "80",
-            "Protocol": "HTTP"
+            "Protocol": "TCP"
+          },
+          {
+            "InstancePort": "443",
+            "InstanceProtocol": "TCP",
+            "LoadBalancerPort": "443",
+            "Protocol": "TCP"
           },
           {
             "InstancePort": "2222",
@@ -266,7 +348,10 @@
           {
             "Fn::GetAtt": ["DeisWebELBSecurityGroup", "GroupId"]
           }
-        ]
+        ],
+        "ConnectionSettings": {
+          "IdleTimeout": 1200
+        }
       }
     },
     "DeisWebELBSecurityGroup": {
@@ -275,6 +360,7 @@
         "GroupDescription": "Deis Web ELB SecurityGroup",
         "SecurityGroupIngress": [
           {"IpProtocol": "tcp", "FromPort": "80", "ToPort": "80", "CidrIp": "0.0.0.0/0"},
+          {"IpProtocol": "tcp", "FromPort": "443", "ToPort": "443", "CidrIp": "0.0.0.0/0"},
           {"IpProtocol": "tcp", "FromPort": "2222", "ToPort": "2222", "CidrIp": "0.0.0.0/0"}
         ],
         "VpcId": { "Ref" : "VPC" }
@@ -287,6 +373,7 @@
         "SecurityGroupIngress" : [
           {"IpProtocol": "tcp", "FromPort" : "22",  "ToPort" : "22",  "CidrIp" : { "Ref" : "SSHFrom" }},
           {"IpProtocol": "tcp", "FromPort": "80", "ToPort": "80", "SourceSecurityGroupId": { "Ref": "DeisWebELBSecurityGroup" } },
+          {"IpProtocol": "tcp", "FromPort": "443", "ToPort": "443", "SourceSecurityGroupId": { "Ref": "DeisWebELBSecurityGroup" } },
           {"IpProtocol": "tcp", "FromPort": "2222", "ToPort": "2222", "SourceSecurityGroupId": { "Ref": "DeisWebELBSecurityGroup" } }
         ],
         "VpcId" : { "Ref" : "VPC" }

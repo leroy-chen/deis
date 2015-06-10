@@ -22,7 +22,7 @@ Dockerfile Requirements
 In order to deploy Dockerfile applications, they must conform to the following requirements:
 
  * The Dockerfile must EXPOSE only one port
- * The exposed port must be an HTTP service that can be connected to an HTTP router
+ * The port must be listening for a HTTP connection
  * A default CMD must be specified for running the container
 
 .. note::
@@ -56,41 +56,38 @@ Use ``git push deis master`` to deploy your application.
     Uploading context
     Step 0 : FROM deis/base:latest
      ---> 60024338bc63
-    Step 1 : MAINTAINER OpDemand <info@opdemand.com>
-     ---> Using cache
-     ---> 2af5ad7f28d6
-    Step 2 : RUN wget -O /tmp/go1.2.1.linux-amd64.tar.gz -q https://go.googlecode.com/files/go1.2.1.linux-amd64.tar.gz
+    Step 1 : RUN wget -O /tmp/go1.2.1.linux-amd64.tar.gz -q https://go.googlecode.com/files/go1.2.1.linux-amd64.tar.gz
      ---> Using cache
      ---> cf9ef8c5caa7
-    Step 3 : RUN tar -C /usr/local -xzf /tmp/go1.2.1.linux-amd64.tar.gz
+    Step 2 : RUN tar -C /usr/local -xzf /tmp/go1.2.1.linux-amd64.tar.gz
      ---> Using cache
      ---> 515b1faf3bd8
-    Step 4 : RUN mkdir -p /go
+    Step 3 : RUN mkdir -p /go
      ---> Using cache
      ---> ebf4927a00e9
-    Step 5 : ENV GOPATH /go
+    Step 4 : ENV GOPATH /go
      ---> Using cache
      ---> c6a276eded37
-    Step 6 : ENV PATH /usr/local/go/bin:/go/bin:$PATH
+    Step 5 : ENV PATH /usr/local/go/bin:/go/bin:$PATH
      ---> Using cache
      ---> 2ba6f6c9f108
-    Step 7 : ADD . /go/src/github.com/deis/helloworld
+    Step 6 : ADD . /go/src/github.com/deis/helloworld
      ---> 94ab7f4b977b
     Removing intermediate container 171b7d9fdb34
-    Step 8 : RUN cd /go/src/github.com/deis/helloworld && go install -v .
+    Step 7 : RUN cd /go/src/github.com/deis/helloworld && go install -v .
      ---> Running in 0c8fbb2d2812
     github.com/deis/helloworld
      ---> 13b5af931393
     Removing intermediate container 0c8fbb2d2812
-    Step 9 : ENV PORT 80
+    Step 8 : ENV PORT 80
      ---> Running in 9b07da36a272
      ---> 2dce83167874
     Removing intermediate container 9b07da36a272
-    Step 10 : CMD ["/go/bin/helloworld"]
+    Step 9 : CMD ["/go/bin/helloworld"]
      ---> Running in f7b215199940
      ---> b1e55ce5195a
     Removing intermediate container f7b215199940
-    Step 11 : EXPOSE 80
+    Step 10 : EXPOSE 80
      ---> Running in 7eb8ec45dcb0
      ---> ea1a8cc93ca3
     Removing intermediate container 7eb8ec45dcb0
@@ -100,28 +97,22 @@ Use ``git push deis master`` to deploy your application.
            Launching... done, v2
 
     -----> folksy-offshoot deployed to Deis
-           http://folksy-offshoot.local.deisapp.com
+           http://folksy-offshoot.local3.deisapp.com
 
            To learn more, use `deis help` or visit http://deis.io
 
-    To ssh://git@local.deisapp.com:2222/folksy-offshoot.git
+    To ssh://git@local3.deisapp.com:2222/folksy-offshoot.git
      * [new branch]      master -> master
 
-    $ curl -s http://folksy-offshoot.local.deisapp.com
+    $ curl -s http://folksy-offshoot.local3.deisapp.com
     Welcome to Deis!
     See the documentation at http://docs.deis.io/ for more information.
 
 Because a Dockerfile application is detected, the ``cmd`` process type is automatically scaled to 1 on first deploy.
 
-Define Process Types
---------------------
-Docker containers have a default command usually specified by a `CMD instruction`_.
-Deis uses the ``cmd`` process type to refer to this default command.
-
-Deis also supports scaling other process types as defined in a `Procfile`_.  To use this functionality, you must:
-
-1. Define process types with a `Procfile`_ in the root of your repository
-2. Include a ``start`` executable that can be called with: ``start <process-type>``
+Use ``deis scale cmd=3`` to increase ``cmd`` processes to 3, for example. Scaling a
+process type directly changes the number of :ref:`Containers <container>`
+running that process.
 
 
 .. _`Dockerfile`: https://docs.docker.com/reference/builder/

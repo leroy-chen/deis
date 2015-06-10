@@ -2,12 +2,15 @@ package utils
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"io/ioutil"
+	"log"
 	"math/rand"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"text/template"
@@ -22,20 +25,23 @@ var Deis = "deis "
 // DeisTestConfig allows tests to be repeated against different
 // targets, with different example apps, using specific credentials, and so on.
 type DeisTestConfig struct {
-	AuthKey     string
-	Hosts       string
-	Domain      string
-	SSHKey      string
-	ClusterName string
-	UserName    string
-	Password    string
-	Email       string
-	ExampleApp  string
-	AppName     string
-	ProcessNum  string
-	ImageID     string
-	Version     string
-	AppUser     string
+	AuthKey            string
+	Hosts              string
+	Domain             string
+	SSHKey             string
+	ClusterName        string
+	UserName           string
+	Password           string
+	Email              string
+	ExampleApp         string
+	AppDomain          string
+	AppName            string
+	ProcessNum         string
+	ImageID            string
+	Version            string
+	AppUser            string
+	SSLCertificatePath string
+	SSLKeyPath         string
 }
 
 // randomApp is used for the test run if DEIS_TEST_APP isn't set
@@ -53,7 +59,7 @@ func GetGlobalConfig() *DeisTestConfig {
 	}
 	domain := os.Getenv("DEIS_TEST_DOMAIN")
 	if domain == "" {
-		domain = "local.deisapp.com"
+		domain = "local3.deisapp.com"
 	}
 	sshKey := os.Getenv("DEIS_TEST_SSH_KEY")
 	if sshKey == "" {
@@ -63,45 +69,86 @@ func GetGlobalConfig() *DeisTestConfig {
 	if exampleApp == "" {
 		exampleApp = randomApp
 	}
+	appDomain := os.Getenv("DEIS_TEST_APP_DOMAIN")
+	if appDomain == "" {
+		appDomain = fmt.Sprintf("test.%s", domain)
+	}
+
+	// generate a self-signed certifcate for the app domain
+	keyOut, err := filepath.Abs(appDomain + ".key")
+	if err != nil {
+		log.Fatal(err)
+	}
+	certOut, err := filepath.Abs(appDomain + ".cert")
+	if err != nil {
+		log.Fatal(err)
+	}
+	cmd := exec.Command("openssl", "req", "-new", "-newkey", "rsa:4096", "-nodes", "-x509",
+		"-days", "1",
+		"-subj", fmt.Sprintf("/C=US/ST=Colorado/L=Boulder/CN=%s", appDomain),
+		"-keyout", keyOut,
+		"-out", certOut)
+	if err := cmd.Start(); err != nil {
+		log.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		log.Fatal(err)
+	}
+
 	var envCfg = DeisTestConfig{
-		AuthKey:     authKey,
-		Hosts:       hosts,
-		Domain:      domain,
-		SSHKey:      sshKey,
-		ClusterName: "dev",
-		UserName:    "test",
-		Password:    "asdf1234",
-		Email:       "test@test.co.nz",
-		ExampleApp:  exampleApp,
-		AppName:     "sample",
-		ProcessNum:  "2",
-		ImageID:     "buildtest",
-		Version:     "2",
-		AppUser:     "test1",
+		AuthKey:            authKey,
+		Hosts:              hosts,
+		Domain:             domain,
+		SSHKey:             sshKey,
+		ClusterName:        "dev",
+		UserName:           "test",
+		Password:           "asdf1234",
+		Email:              "test@test.co.nz",
+		ExampleApp:         exampleApp,
+		AppDomain:          appDomain,
+		AppName:            "sample",
+		ProcessNum:         "2",
+		ImageID:            "buildtest",
+		Version:            "2",
+		AppUser:            "test1",
+		SSLCertificatePath: certOut,
+		SSLKeyPath:         keyOut,
 	}
 	return &envCfg
 }
 
 func doCurl(url string) ([]byte, error) {
-	response, err := http.Get(url)
-	defer response.Body.Close()
+	// disable security check for self-signed certificates
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	client := &http.Client{Transport: tr}
+	response, err := client.Get(url)
 	if err != nil {
 		return nil, err
 	}
-
+	defer response.Body.Close()
 	body, err := ioutil.ReadAll(response.Body)
 
-	if !strings.Contains(string(body), "Powered by Deis") {
-		return nil, fmt.Errorf("App not started (%d)", response.StatusCode)
+	if !strings.Contains(string(body), "Powered by") {
+		return nil, fmt.Errorf("App not started (%d)\nBody: (%s)", response.StatusCode, string(body))
 	}
 
 	return body, nil
 }
 
-// Curl connects to a Deis endpoint to see if the example app is running.
-func Curl(t *testing.T, params *DeisTestConfig) {
-	url := "http://" + params.AppName + "." + params.Domain
+// Curl connects to an endpoint to see if the endpoint is responding.
+func Curl(t *testing.T, url string) {
+	CurlWithFail(t, url, false, "")
+}
 
+// CurlApp is a convenience function to see if the example app is running.
+func CurlApp(t *testing.T, cfg DeisTestConfig) {
+	CurlWithFail(t, fmt.Sprintf("http://%s.%s", cfg.AppName, cfg.Domain), false, "")
+}
+
+// CurlWithFail connects to a Deis endpoint to see if the example app is running.
+func CurlWithFail(t *testing.T, url string, failFlag bool, expect string) {
 	// FIXME: try the curl a few times
 	for i := 0; i < 20; i++ {
 		body, err := doCurl(url)
@@ -114,41 +161,29 @@ func Curl(t *testing.T, params *DeisTestConfig) {
 
 	// once more to fail with an error
 	body, err := doCurl(url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fmt.Println(string(body))
-}
 
-// AuthCancel tests whether `deis auth:cancel` destroys a user's account.
-func AuthCancel(t *testing.T, params *DeisTestConfig) {
-	fmt.Println("deis auth:cancel")
-	child, err := gexpect.Spawn(Deis + " auth:cancel")
-	if err != nil {
-		t.Fatalf("command not started\n%v", err)
+	switch failFlag {
+	case true:
+		if err != nil {
+			if strings.Contains(string(err.Error()), expect) {
+				fmt.Println("(Error expected...ok) " + expect)
+			} else {
+				t.Fatal(err)
+			}
+		} else {
+			if strings.Contains(string(body), expect) {
+				fmt.Println("(Error expected...ok) " + expect)
+			} else {
+				t.Fatal(err)
+			}
+		}
+	case false:
+		if err != nil {
+			t.Fatal(err)
+		} else {
+			fmt.Println(string(body))
+		}
 	}
-	fmt.Println("username:")
-	err = child.Expect("username:")
-	if err != nil {
-		t.Fatalf("expect username failed\n%v", err)
-	}
-	child.SendLine(params.UserName)
-	fmt.Print("password:")
-	err = child.Expect("password:")
-	if err != nil {
-		t.Fatalf("expect password failed\n%v", err)
-	}
-	child.SendLine(params.Password)
-	err = child.ExpectRegex("(y/n)")
-	if err != nil {
-		t.Fatalf("expect cancel \n%v", err)
-	}
-	child.SendLine("y")
-	err = child.Expect("Account cancelled")
-	if err != nil {
-		t.Fatalf("command executiuon failed\n%v", err)
-	}
-	child.Close()
 }
 
 // AuthPasswd tests whether `deis auth:passwd` updates a user's password.
@@ -204,11 +239,10 @@ func CheckList(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(stdout.String(), contain) == notflag {
-		if notflag {
-			t.Fatalf(
-				"Didn't expect '%s' in command output:\n%v", contain, stdout)
-		}
+	if notflag && strings.Contains(stdout.String(), contain) {
+		t.Fatalf("Didn't expect '%s' in command output:\n%v", contain, stdout)
+	}
+	if !notflag && !strings.Contains(stdout.String(), contain) {
 		t.Fatalf("Expected '%s' in command output:\n%v", contain, stdout)
 	}
 }
@@ -228,7 +262,7 @@ func Execute(t *testing.T, cmd string, params interface{}, failFlag bool, expect
 	cmdString := cmdBuf.String()
 	fmt.Println(cmdString)
 	var cmdl *exec.Cmd
-	if strings.Contains(cmd, "git") {
+	if strings.Contains(cmd, "git ") {
 		cmdl = exec.Command("sh", "-c", cmdString)
 	} else {
 		cmdl = exec.Command("sh", "-c", Deis+cmdString)
@@ -289,6 +323,7 @@ func GetRandomApp() string {
 		"example-python-flask",
 		"example-ruby-sinatra",
 		"example-scala",
+		"example-dockerfile-http",
 	}
 	return apps[rand.Intn(len(apps))]
 }

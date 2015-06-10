@@ -29,10 +29,22 @@ and then reinstall platform components.
 
 Use the following steps to perform an in-place upgrade of your Deis cluster.
 
+First, use the current ``deisctl`` to stop and uninstall the Deis platform.
+
 .. code-block:: console
 
+    $ deisctl --version  # should match the installed platform
+    1.0.2
     $ deisctl stop platform && deisctl uninstall platform
-    $ deisctl config platform set version=v1.0.1
+
+Finally, update ``deisctl`` to the new version and reinstall:
+
+.. code-block:: console
+
+    $ curl -sSL http://deis.io/deisctl/install.sh | sh -s 1.7.0
+    $ deisctl --version  # should match the desired platform
+    1.7.0
+    $ deisctl config platform set version=v1.7.0
     $ deisctl install platform
     $ deisctl start platform
 
@@ -40,6 +52,11 @@ Use the following steps to perform an in-place upgrade of your Deis cluster.
 
     In-place upgrades incur approximately 10-30 minutes of downtime for deployed applications, the router mesh
     and the platform control plane.  Please plan your maintenance windows accordingly.
+
+Upgrade Deis clients
+^^^^^^^^^^^^^^^^^^^^
+As well as upgrading ``deisctl``, make sure to upgrade the :ref:`deis client <install-client>` to
+match the new version of Deis.
 
 
 Migration Upgrade
@@ -146,23 +163,33 @@ Retire the old cluster
 Once all applications have been validated, the old cluster can be retired.
 
 
+.. _upgrading-coreos:
+
 Upgrading CoreOS
 ----------------
 
-Sometimes you may need to update CoreOS manually in order to get Deis to work. For example, Deis
-requires a minimum of CoreOS v472.0.0. To update CoreOS, run the following
-commands:
+By default, Deis disables CoreOS automatic updates. This is partially because in the case of a
+machine reboot, Deis components will be scheduled to a new host and will need a few minutes to start
+and restore to a running state. This results in a short downtime of the Deis control plane,
+which can be disruptive if unplanned.
 
-.. code-block:: console
+Additionally, because Deis customizes the CoreOS cloud-config file, upgrading the CoreOS host to
+a new version without accounting for changes in the cloud-config file could cause Deis to stop
+functioning properly.
 
-    $ ssh core@<server ip>
-    $ sudo su
-    $ systemctl unmask update-engine.service
-    $ systemctl start update-engine.service
-    $ update_engine_client -update
-    $ systemctl stop update-engine.service
-    $ systemctl mask update-engine.service
-    $ reboot
+.. important::
+
+  Enabling updates for CoreOS will result in the machine upgrading to the latest CoreOS release
+  available in a particular channel. Sometimes, new CoreOS releases make changes that will break
+  Deis. It is always recommended to provision a Deis release with the CoreOS version specified
+  in that release's provision scripts or documentation.
+
+While typically not recommended, it is possible to trigger an update of a CoreOS machine. Some
+Deis releases may recommend a CoreOS upgrade - in these cases, the release notes for a Deis release
+will point to this documentation.
+
+Checking the CoreOS version
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 You can check the CoreOS version by running the following command on the CoreOS machine:
 
@@ -175,3 +202,57 @@ Or from your local machine:
 .. code-block:: console
 
     $ ssh core@<server ip> 'cat /etc/os-release'
+
+
+Triggering an upgrade
+^^^^^^^^^^^^^^^^^^^^^
+
+To upgrade CoreOS, run the following commands:
+
+.. code-block:: console
+
+    $ ssh core@<server ip>
+    $ sudo su
+    $ echo GROUP=stable > /etc/coreos/update.conf
+    $ systemctl unmask update-engine.service
+    $ systemctl start update-engine.service
+    $ update_engine_client -update
+    $ systemctl stop update-engine.service
+    $ systemctl mask update-engine.service
+    $ reboot
+
+.. warning::
+
+  You should only upgrade one host at a time. Removing multiple hosts from the cluster
+  simultaneously can result in failure of the etcd cluster. Ensure the recently-rebooted host
+  has returned to the cluster with ``fleetctl list-machines`` before moving on to the next host.
+
+After the host reboots, ``update-engine.service`` should be unmasked and started once again:
+
+.. code-block:: console
+
+    $ systemctl unmask update-engine.service
+    $ systemctl start update-engine.service
+
+It may take a few minutes for CoreOS to recognize that the update has been applied successfully, and
+only then will it update the boot flags to use the new image on subsequent reboots. This can be confirmed
+by watching the ``update-engine`` journal:
+
+.. code-block:: console
+
+    $ journalctl -fu update-engine
+
+Seeing a message like ``Updating boot flags...`` means that the update has finished, and the service
+should be stopped and masked once again:
+
+.. code-block:: console
+
+    $ systemctl stop update-engine.service
+    $ systemctl mask update-engine.service
+
+The update is now complete.
+
+.. note::
+
+    Users have reported that some cloud providers do not allow the boot partition to be updated,
+    resulting in CoreOS reverting to the originally installed version on a reboot.

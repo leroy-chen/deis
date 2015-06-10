@@ -16,7 +16,7 @@ clients, and one contains the documentation. Components have source-code level
 verify the behavior of the components together as a system.
 
 GitHub pull requests for Deis are tested automatically by a Jenkins
-`continuous integration`_ (CI) system at http://ci.deis.io. Contributors should
+`continuous integration`_ (CI) system at https://ci.deis.io. Contributors should
 run the same tests locally before proposing any changes to the Deis codebase.
 
 
@@ -56,6 +56,14 @@ continuous deployment, start one locally:
     To use local boot2docker registry for Deis development:
         export DEV_REGISTRY=192.168.59.103:5000
 
+.. important::
+
+    The functional tests also use several mock or example containers:
+    **deis/test-etcd**, **deis/test-postgresql**, and **deis/mock-store**.
+    These are referenced by the ``:latest`` tag, so in the rare case that one
+    of these test containers needs to change, ``docker rmi`` its image and
+    the tests will pull it from Docker Hub or rebuild it.
+
 
 Run the Tests
 -------------
@@ -68,6 +76,14 @@ Scripts in the ``tests/bin`` directory are the best place to start. These test
 individual pieces of Deis, then bring up a Vagrant cluster and test all of them
 as a system. They call ``tests/bin/test-setup.sh`` to test for important
 environment variables and will exit with a helpful message if any are missing.
+
+The ``test-setup.sh`` script also prepares the testing environment, as well as
+tears it down after testing is complete. If there is a test failure, the script
+collects verbose component logs, compresses them, and places them in ``$HOME``.
+If `s3cmd`_ is installed and configured on the test machine, the script will
+instead upload the logs to Amazon S3. This is how the Jenkins CI infrastructure
+is configured, so that contributors have access to the logs to see how their
+PR failed.
 
 test-integration.sh
 ^^^^^^^^^^^^^^^^^^^
@@ -88,7 +104,7 @@ test-integration.sh
     >>> Preparing test environment <<<
 
     DEIS_ROOT=/Users/matt/Projects/src/github.com/deis/deis
-    DEIS_TEST_APP=example-go
+    DEIS_TEST_APP=example-dockerfile-http
     ...
     >>> Running integration suite <<<
 
@@ -155,3 +171,4 @@ variables that can affect the tests' behavior. Here are some important ones:
 .. _`source code`: https://github.com/deis/deis
 .. _`Docker registry`: https://github.com/docker/docker-registry
 .. _`Deis example app`: https://github.com/deis?query=example-
+.. _`s3cmd`: http://s3tools.org/s3cmd

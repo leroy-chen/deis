@@ -4,8 +4,14 @@ Django settings for the Deis project.
 
 from __future__ import unicode_literals
 import os.path
+import random
+import string
 import sys
 import tempfile
+import ldap
+
+from django_auth_ldap.config import LDAPSearch, GroupOfNamesType
+
 
 PROJECT_ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), '..'))
 
@@ -20,9 +26,9 @@ MANAGERS = ADMINS
 
 CONN_MAX_AGE = 60 * 3
 
-# Hosts/domain names that are valid for this site; required if DEBUG is False
-# See https://docs.djangoproject.com/en/1.5/ref/settings/#allowed-hosts
-ALLOWED_HOSTS = ['localhost']
+# SECURITY: change this to allowed fqdn's to prevent host poisioning attacks
+# https://docs.djangoproject.com/en/1.6/ref/settings/#allowed-hosts
+ALLOWED_HOSTS = ['*']
 
 # Local time zone for this installation. Choices can be found here:
 # http://en.wikipedia.org/wiki/List_of_tz_zones_by_name
@@ -107,7 +113,8 @@ MIDDLEWARE_CLASSES = (
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
-    'api.middleware.VersionMiddleware',
+    'api.middleware.APIVersionMiddleware',
+    'deis.middleware.PlatformVersionMiddleware',
     # Uncomment the next line for simple clickjacking protection:
     # 'django.middleware.clickjacking.XFrameOptionsMiddleware',
 )
@@ -135,7 +142,7 @@ INSTALLED_APPS = (
     'django.contrib.sites',
     'django.contrib.staticfiles',
     # Third-party apps
-    'django_fsm',
+    'django_auth_ldap',
     'guardian',
     'json_field',
     'gunicorn',
@@ -149,15 +156,12 @@ INSTALLED_APPS = (
 )
 
 AUTHENTICATION_BACKENDS = (
+    "django_auth_ldap.backend.LDAPBackend",
     "django.contrib.auth.backends.ModelBackend",
     "guardian.backends.ObjectPermissionBackend",
 )
 
 ANONYMOUS_USER_ID = -1
-ACCOUNT_EMAIL_REQUIRED = True
-ACCOUNT_EMAIL_VERIFICATION = 'none'
-ACCOUNT_LOGOUT_ON_GET = True
-ACCOUNT_USERNAME_BLACKLIST = ['system']
 LOGIN_URL = '/v1/auth/login/'
 LOGIN_REDIRECT_URL = '/'
 
@@ -169,12 +173,17 @@ CORS_ALLOW_HEADERS = (
     'content-type',
     'accept',
     'origin',
-    'Authentication',
+    'Authorization',
+    'Host',
 )
 
 CORS_EXPOSE_HEADERS = (
-    'X_DEIS_VERSION',
-    'X_DEIS_RELEASE',
+    'X_DEIS_API_VERSION',  # DEPRECATED
+    'X_DEIS_PLATFORM_VERSION',  # DEPRECATED
+    'X-Deis-Release',  # DEPRECATED
+    'DEIS_API_VERSION',
+    'DEIS_PLATFORM_VERSION',
+    'Deis-Release',
 )
 
 REST_FRAMEWORK = {
@@ -186,7 +195,11 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'rest_framework.authentication.TokenAuthentication',
     ),
+    'DEFAULT_RENDERER_CLASSES': (
+        'rest_framework.renderers.JSONRenderer',
+    ),
     'PAGINATE_BY': 100,
+    'TEST_REQUEST_DEFAULT_FORMAT': 'json',
 }
 
 # URLs that end with slashes are ugly
@@ -269,14 +282,16 @@ ETCD_HOST, ETCD_PORT = os.environ.get('ETCD', '127.0.0.1:4001').split(',')[0].sp
 DEIS_LOG_DIR = os.path.abspath(os.path.join(__file__, '..', '..', 'logs'))
 LOG_LINES = 1000
 TEMPDIR = tempfile.mkdtemp(prefix='deis')
-DEFAULT_BUILD = 'deis/helloworld'
 DEIS_DOMAIN = 'deisapp.local'
 
 # standard datetime format used for logging, model timestamps, etc.
 DEIS_DATETIME_FORMAT = '%Y-%m-%dT%H:%M:%S%Z'
 
+# names which apps cannot reserve for routing
+DEIS_RESERVED_NAMES = ['deis']
+
 # default scheduler settings
-SCHEDULER_MODULE = 'mock'
+SCHEDULER_MODULE = 'scheduler.mock'
 SCHEDULER_TARGET = ''  # path to scheduler endpoint (e.g. /var/run/fleet.sock)
 SCHEDULER_AUTH = ''
 SCHEDULER_OPTIONS = {}
@@ -303,18 +318,34 @@ DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.' + os.environ.get('DATABASE_ENGINE', 'postgresql_psycopg2'),
         'NAME': os.environ.get('DATABASE_NAME', 'deis'),
+        # randomize test database name so we can run multiple unit tests simultaneously
+        'TEST_NAME': "unittest-{}".format(''.join(
+            random.choice(string.ascii_letters + string.digits) for _ in range(8)))
     }
 }
 
 APP_URL_REGEX = '[a-z0-9-]+'
 
-# SECURITY: change this to allowed fqdn's to prevent host poisioning attacks
-# see https://docs.djangoproject.com/en/1.5/ref/settings/#std:setting-ALLOWED_HOSTS
-ALLOWED_HOSTS = ['*']
-
 # Honor HTTPS from a trusted proxy
 # see https://docs.djangoproject.com/en/1.6/ref/settings/#secure-proxy-ssl-header
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+
+# Unit Hostname handling.
+# Supports:
+#  default      - Docker generated hostname
+#  application  - Hostname based on application unit name (i.e. my-application.v2.web.1)
+#  server       - Hostname based on CoreOS server hostname
+UNIT_HOSTNAME = 'default'
+
+# LDAP DEFAULT SETTINGS (Overrided by confd later)
+LDAP_ENDPOINT = ""
+BIND_DN = ""
+BIND_PASSWORD = ""
+USER_BASEDN = ""
+USER_FILTER = ""
+GROUP_BASEDN = ""
+GROUP_FILTER = ""
+GROUP_TYPE = ""
 
 # Create a file named "local_settings.py" to contain sensitive settings data
 # such as database configuration, admin email, or passwords and keys. It
@@ -326,9 +357,41 @@ try:
 except ImportError:
     pass
 
-
 # have confd_settings within container execution override all others
 # including local_settings (which may end up in the container)
 if os.path.exists('/templates/confd_settings.py'):
     sys.path.append('/templates')
     from confd_settings import *  # noqa
+
+# LDAP Backend Configuration
+# Should be always after the confd_settings import.
+LDAP_USER_SEARCH = LDAPSearch(
+    base_dn=USER_BASEDN,
+    scope=ldap.SCOPE_SUBTREE,
+    filterstr="(%s=%%(user)s)" % USER_FILTER
+)
+LDAP_GROUP_SEARCH = LDAPSearch(
+    base_dn=GROUP_BASEDN,
+    scope=ldap.SCOPE_SUBTREE,
+    filterstr="(%s=%s)" % (GROUP_FILTER, GROUP_TYPE)
+)
+AUTH_LDAP_SERVER_URI = LDAP_ENDPOINT
+AUTH_LDAP_BIND_DN = BIND_DN
+AUTH_LDAP_BIND_PASSWORD = BIND_PASSWORD
+AUTH_LDAP_USER_SEARCH = LDAP_USER_SEARCH
+AUTH_LDAP_GROUP_SEARCH = LDAP_GROUP_SEARCH
+AUTH_LDAP_GROUP_TYPE = GroupOfNamesType()
+AUTH_LDAP_USER_ATTR_MAP = {
+    "first_name": "givenName",
+    "last_name": "sn",
+    "email": "mail",
+    "username": USER_FILTER,
+}
+AUTH_LDAP_GLOBAL_OPTIONS = {
+    ldap.OPT_X_TLS_REQUIRE_CERT: False,
+    ldap.OPT_REFERRALS: False
+}
+AUTH_LDAP_ALWAYS_UPDATE_USER = True
+AUTH_LDAP_MIRROR_GROUPS = True
+AUTH_LDAP_FIND_GROUP_PERMS = True
+AUTH_LDAP_CACHE_GROUPS = False

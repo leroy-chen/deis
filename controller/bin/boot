@@ -13,7 +13,7 @@ set -eo pipefail
 export ETCD_PORT=${ETCD_PORT:-4001}
 export ETCD="$HOST:$ETCD_PORT"
 export ETCD_PATH=${ETCD_PATH:-/deis/controller}
-export ETCD_TTL=${ETCD_TTL:-10}
+export ETCD_TTL=${ETCD_TTL:-20}
 
 # wait for etcd to be available
 until etcdctl --no-sync -C $ETCD ls >/dev/null 2>&1; do
@@ -26,9 +26,10 @@ sleep $(($ETCD_TTL+1))
 
 function etcd_set_default {
 	set +e
-	etcdctl --no-sync -C $ETCD mk $ETCD_PATH/$1 $2 >/dev/null 2>&1
-	if [[ $? -ne 0 && $? -ne 4 ]]; then
-		echo "etcd_set_default: an etcd error occurred. aborting..."
+	ERROR="$(etcdctl --no-sync -C $ETCD mk $ETCD_PATH/$1 $2 2>&1 >/dev/null)"
+	if [[ $? -ne 0 && $(echo $ERROR | grep -ive "key already exists") ]]; then
+		echo "etcd_set_default: an etcd error occurred ($ERROR)"
+		echo "aborting..."
 		exit 1
 	fi
 	set -e
@@ -36,9 +37,10 @@ function etcd_set_default {
 
 function etcd_safe_mkdir {
 	set +e
-	etcdctl --no-sync -C $ETCD mkdir $1 >/dev/null 2>&1
-	if [[ $? -ne 0 && $? -ne 4 ]]; then
-		echo "etcd_safe_mkdir: an etcd error occurred. aborting..."
+	ERROR="$(etcdctl --no-sync -C $ETCD mkdir $1 2>&1 >/dev/null)"
+	if [[ $? -ne 0 && $(echo $ERROR | grep -ive "key already exists") ]]; then
+		echo "etcd_safe_mkdir: an etcd error occurred ($ERROR)"
+		echo "aborting..."
 		exit 1
 	fi
 	set -e
@@ -47,16 +49,26 @@ function etcd_safe_mkdir {
 etcd_set_default protocol ${DEIS_PROTOCOL:-http}
 etcd_set_default secretKey ${DEIS_SECRET_KEY:-`openssl rand -base64 64 | tr -d '\n'`}
 etcd_set_default builderKey ${DEIS_BUILDER_KEY:-`openssl rand -base64 64 | tr -d '\n'`}
-etcd_set_default registrationEnabled 1
+etcd_set_default registrationMode "enabled"
 etcd_set_default webEnabled 0
+etcd_set_default unitHostname default
 
 # safely create required keyspaces
-etcd_safe_mkdir /deis/services
 etcd_safe_mkdir /deis/domains
 etcd_safe_mkdir /deis/platform
+etcd_safe_mkdir /deis/scheduler
+etcd_safe_mkdir /deis/services
+
+# run etcd data migrations
+echo "controller: running etcd data migrations..."
+for script in $(ls /app/migrations/data/*.sh);
+do
+    . $script;
+done
+echo "controller: done running etcd data migrations."
 
 # wait for confd to run once and install initial templates
-until confd -onetime -node $ETCD -config-file /app/confd.toml 2>/dev/null; do
+until confd -onetime -node $ETCD --confdir /app --log-level error; do
 	echo "controller: waiting for confd to write initial templates..."
 	sleep $(($ETCD_TTL/2))  # sleep for half the TTL
 done
@@ -70,21 +82,19 @@ chmod 777 /data/logs
 sudo -E -u deis ./manage.py syncdb --migrate --noinput
 
 # spawn a gunicorn server in the background
-sudo -E -u deis gunicorn deis.wsgi -b 0.0.0.0 -w 8 -n deis --timeout=1200 --pid=/tmp/gunicorn.pid \
-                         --log-level info --error-logfile - --access-logfile - \
-                         --access-logformat '%(h)s "%(r)s" %(s)s %(b)s "%(a)s"' &
+sudo -E -u deis gunicorn -c deis/gconf.py deis.wsgi &
 
-# smart shutdown on SIGINT and SIGTERM
+# smart shutdown on SIGTERM (SIGINT is handled by gunicorn)
 function on_exit() {
 	GUNICORN_PID=$(cat /tmp/gunicorn.pid)
 	kill -TERM $GUNICORN_PID 2>/dev/null
 	wait $GUNICORN_PID 2>/dev/null
 	exit 0
 }
-trap on_exit INT TERM
+trap on_exit TERM
 
 # spawn confd in the background to update services based on etcd changes
-confd -node $ETCD -config-file /app/confd.toml &
+confd -node $ETCD --confdir /app --log-level error --interval 5 &
 CONFD_PID=$!
 
 echo deis-controller running...

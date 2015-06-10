@@ -9,14 +9,18 @@ import (
 	"regexp"
 
 	"github.com/deis/deis/logger/syslog"
+
+	"github.com/deis/deis/logger/drain"
 )
 
-const logRoot = "/data/logs"
+// LogRoot is the log path to store logs.
+var LogRoot string
 
 type handler struct {
 	// To simplify implementation of our handler we embed helper
 	// syslog.BaseHandler struct.
 	*syslog.BaseHandler
+	drainURI string
 }
 
 // Simple fiter for named/bind messages which can be used with BaseHandler
@@ -25,8 +29,11 @@ func filter(m syslog.SyslogMessage) bool {
 }
 
 func newHandler() *handler {
-	h := handler{syslog.NewBaseHandler(5, filter, false)}
-	go h.mainLoop() // BaseHandler needs some gorutine that reads from its queue
+	h := handler{
+		BaseHandler: syslog.NewBaseHandler(5, filter, false),
+	}
+
+	go h.mainLoop() // BaseHandler needs some goroutine that reads from its queue
 	return &h
 }
 
@@ -49,7 +56,7 @@ func getLogFile(message string) (io.Writer, error) {
 		return nil, fmt.Errorf("Could not find app name in message: %s", message)
 	}
 	appName := match[1]
-	filePath := path.Join(logRoot, appName+".log")
+	filePath := path.Join(LogRoot, appName+".log")
 	// check if file exists
 	exists, err := fileExists(filePath)
 	if err != nil {
@@ -82,6 +89,9 @@ func (h *handler) mainLoop() {
 		if m == nil {
 			break
 		}
+		if h.drainURI != "" {
+			drain.SendToDrain(m.String(), h.drainURI)
+		}
 		err := writeToDisk(m)
 		if err != nil {
 			log.Println(err)
@@ -91,20 +101,33 @@ func (h *handler) mainLoop() {
 }
 
 // Listen starts a new syslog server which runs until it receives a signal.
-func Listen(signalChan chan os.Signal, cleanupDone chan bool) {
+func Listen(exitChan, cleanupDone chan bool, drainChan chan string, bindAddr string) {
 	fmt.Println("Starting syslog...")
-	// Create a server with one handler and run one listen gorutine
+	// If LogRoot doesn't exist, create it
+	// equivalent to Python's `if not os.path.exists(filename)`
+	if _, err := os.Stat(LogRoot); os.IsNotExist(err) {
+		if err = os.MkdirAll(LogRoot, 0777); err != nil {
+			log.Fatalf("unable to create LogRoot at %s: %v", LogRoot, err)
+		}
+	}
+	// Create a server with one handler and run one listen goroutine
 	s := syslog.NewServer()
-	s.AddHandler(newHandler())
-	s.Listen("0.0.0.0:514")
+	h := newHandler()
+	s.AddHandler(h)
+	s.Listen(bindAddr)
 	fmt.Println("Syslog server started...")
 	fmt.Println("deis-logger running")
 
 	// Wait for terminating signal
-	for _ = range signalChan {
-		// Shutdown the server
-		fmt.Println("Shutting down...")
-		s.Shutdown()
-		cleanupDone <- true
+	for {
+		select {
+		case <-exitChan:
+			// Shutdown the server
+			fmt.Println("Shutting down...")
+			s.Shutdown()
+			cleanupDone <- true
+		case d := <-drainChan:
+			h.drainURI = d
+		}
 	}
 }

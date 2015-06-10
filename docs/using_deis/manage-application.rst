@@ -45,7 +45,9 @@ Use ``deis run`` to execute commands on the deployed application.
 
 .. code-block:: console
 
-    $ deis run ls -l
+    $ deis run 'ls -l'
+    Running `ls -l`...
+
     total 28
     -rw-r--r-- 1 root root  553 Dec  2 23:59 LICENSE
     -rw-r--r-- 1 root root   60 Dec  2 23:59 Procfile
@@ -57,15 +59,15 @@ Use ``deis run`` to execute commands on the deployed application.
 
 Share the Application
 ---------------------
-Use ``deis sharing:add`` to allow another Deis user to collaborate on your application.
+Use ``deis perms:create`` to allow another Deis user to collaborate on your application.
 
 .. code-block:: console
 
-  $ deis sharing:add otheruser
+  $ deis perms:create otheruser
   Adding otheruser to peachy-waxworks collaborators... done
 
-Use ``deis sharing`` to see who an application is currently shared with, and
-``deis sharing:remove`` to remove a collaborator.
+Use ``deis perms`` to see who an application is currently shared with, and
+``deis perms:remove`` to remove a collaborator.
 
 .. note::
     Collaborators can do anything with an application that its owner can do,
@@ -78,7 +80,7 @@ When working with an application that has been shared with you, clone the origin
   $ git clone https://github.com/deis/example-java-jetty.git
   Cloning into 'example-java-jetty'... done
   $ cd example-java-jetty
-  $ git remote add -f deis ssh://git@local.deisapp.com:2222/peachy-waxworks.git
+  $ git remote add -f deis ssh://git@local3.deisapp.com:2222/peachy-waxworks.git
   Updating deis
   From deis-controller.local:peachy-waxworks
    * [new branch]      master     -> deis/master

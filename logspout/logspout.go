@@ -14,6 +14,7 @@ import (
 
 	"code.google.com/p/go.net/websocket"
 	"github.com/coreos/go-etcd/etcd"
+	dtime "github.com/deis/deis/pkg/time"
 	"github.com/fsouza/go-dockerclient"
 	"github.com/go-martini/martini"
 )
@@ -72,7 +73,7 @@ func syslogStreamer(target Target, types []string, logstream chan *Log) {
 		// HACK: Go's syslog package hardcodes the log format, so let's send our own message
 		_, err = fmt.Fprintf(conn,
 			"%s %s[%s]: %s",
-			time.Now().Format("2006-01-02T15:04:05MST"),
+			time.Now().Format(getopt("DATETIME_FORMAT", dtime.DeisDatetimeFormat)),
 			tag,
 			pid,
 			logline.Data)

@@ -39,11 +39,11 @@ $ deisctl install platform
 Logging subsystem...
 deis-logger.service: loaded
 Storage subsystem...
-deis-store-gateway.service: loaded
+deis-store-gateway@1.service: loaded
 Control plane...
 deis-cache.service: loaded
 deis-database.service: loaded
-deis-registry.service: loaded
+deis-registry@1.service: loaded
 deis-controller.service: loaded
 deis-builder.service: loaded
 Data plane...
@@ -66,11 +66,11 @@ deis-logspout.service: running
 Storage subsystem...
 deis-store-daemon.service: running
 deis-store-monitor.service: running
-deis-store-gateway.service: running
+deis-store-gateway@1.service: running
 Control plane...
 deis-cache.service: running
 deis-database.service: running
-deis-registry.service: running
+deis-registry@1.service: running
 deis-controller.service: running
 deis-builder.service: running
 Data plane...
@@ -84,7 +84,7 @@ Done.
 
 Note that the default start command activates 1 of each component.
 You can scale components with `deisctl scale router=3`, for example.
-The router is the only component that _currently_ scales beyond 1 unit.
+The router, the registry and the store gateway are the only component that _currently_ scales beyond 1 unit.
 
 You can also use the `deisctl uninstall` command to destroy platform units:
 
@@ -103,9 +103,9 @@ deis-controller.service: inactive
 deis-builder.service: inactive
 deis-cache.service: inactive
 deis-database.service: inactive
-deis-registry.service: inactive
+deis-registry@1.service: inactive
 Storage subsystem...
-deis-store-gateway.service: inactive
+deis-store-gateway@1.service: inactive
 Logging subsystem...
 deis-logger.service: inactive
 Done.
@@ -140,7 +140,7 @@ deis-cache.service  		f936b7a5.../172.17.8.100	loaded	active	running
 deis-controller.service	    f936b7a5.../172.17.8.100	loaded	active	running
 deis-database.service		f936b7a5.../172.17.8.100	loaded	active	running
 deis-logger.service	    	f936b7a5.../172.17.8.100	loaded	active	running
-deis-registry.service		f936b7a5.../172.17.8.100	loaded	active	running
+deis-registry@1.service		f936b7a5.../172.17.8.100	loaded	active	running
 deis-router@1.service		f936b7a5.../172.17.8.100	loaded	active	running
 ```
 
@@ -149,8 +149,8 @@ $ deisctl status controller
 ● deis-controller.service - deis-controller
    Loaded: loaded (/run/fleet/units/deis-controller.service; linked-runtime)
    Active: active (running) since Mon 2014-08-25 22:56:50 UTC; 15min ago
-  Process: 22969 ExecStartPre=/bin/sh -c docker inspect deis-controller >/dev/null && docker rm -f deis-controller || true (code=exited, status=0/SUCCESS)
-  Process: 22945 ExecStartPre=/bin/sh -c IMAGE=`/run/deis/bin/get_image /deis/controller`; docker history $IMAGE >/dev/null || docker pull $IMAGE (code=exited, status=0/SUCCESS)
+  Process: 22969 ExecStartPre=/bin/sh -c docker inspect deis-controller >/dev/null 2>&1 && docker rm -f deis-controller || true (code=exited, status=0/SUCCESS)
+  Process: 22945 ExecStartPre=/bin/sh -c IMAGE=`/run/deis/bin/get_image /deis/controller`; docker history $IMAGE >/dev/null 2>&1 || docker pull $IMAGE (code=exited, status=0/SUCCESS)
  Main PID: 22979 (sh)
    CGroup: /system.slice/system-deis\x2dcontroller.slice/deis-controller.service
            ├─22979 /bin/sh -c IMAGE=`/run/deis/bin/get_image /deis/controller` && docker run --name deis-controller --rm -p 8000:8000 -e PUBLISH=8000 -e HOST=$COREOS_PRIVATE_IPV4 --volumes-from=deis-logger $IMAGE
@@ -208,7 +208,7 @@ deisctl looks for unit files in these directories, in this order:
 
 ## License
 
-Copyright 2014, OpDemand LLC
+Copyright 2014, Engine Yard, Inc.
 
 Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at <http://www.apache.org/licenses/LICENSE-2.0>
 

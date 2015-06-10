@@ -6,27 +6,39 @@
 Configure DNS
 =============
 
-For local clusters, we've created the DNS record ``local.deisapp.com`` which resolves to the IP of the first VM, 172.17.8.100.
-You can use ``local.deisapp.com`` to both log into the controller and to access applications that you've deployed (they will be subdomains of ``local.deisapp.com``, like ``happy-unicorn.local.deisapp.com``). Similarly, you can use ``local3.deisapp.com`` or ``local5.deisapp.com`` for 3- and 5-node clusters, respectively. No DNS configuration is necessary for local clusters.
+For Deis clusters on EC2, GCE, Azure, DigitalOcean, Rackspace, OpenStack, or bare metal,
+:ref:`DNS records <dns_records>` must be created. The cluster runs multiple routers in
+front of the Deis controller and apps you deploy, so a
+:ref:`load balancer <configure-load-balancers>` is recommended.
 
-For Deis clusters hosted elsewhere (EC2, Rackspace, DigitalOcean, Google Compute Engine, bare metal, etc.), DNS records will need to be created to point to the cluster. For a one-node cluster, we schedule and launch one router, and deis-router and deis-controller will run on the same host. So, the DNS record specified below can be configured to point to this one machine.
+Vagrant
+-------
 
-On a multi-node cluster, however, there are probably multiple routers, and the controller will likely be scheduled on a separate machine. As mentioned in :ref:`configure-load-balancers`, a load balancer is recommended in this scenario.
+For local Vagrant clusters, no DNS configuration is required. The domain
+``local3.deisapp.com`` already resolves to the IPs of the first 3 VMs provisioned
+by Deis' Vagrantfile: 172.17.8.100, 172.17.8.101, 172.17.8.102.
 
-Note that the controller will eventually live behind the routers so that all external traffic will flow through the load balancer - configuring a DNS record which points to a service whose IP could change is less than ideal.
+Use ``deis.local3.deisapp.com`` to log in to the controller on a 3-node Vagrant
+cluster. Apps that you deploy will have their name prefixed to the domain, such
+as "golden-chinbone.local3.deisapp.com".
+
+Similarly, use ``local5.deisapp.com`` for a 5-node Vagrant cluster.
 
 .. _dns_records:
 
 Necessary DNS records
 ---------------------
 
-Deis requires one wildcard DNS record. Assuming ``myapps.com`` is the top-level domain apps will live under:
+Deis requires a wildcard DNS record. Assuming ``myapps.com`` is the top-level domain
+apps will live under:
 
-* ``*.myapps.com`` should have A-record entries for each of the load balancer IP addresses
+* ``*.myapps.com`` should have "A" record entries for each of the load balancer's IP addresses
 
 Apps can then be accessed by browsers at ``appname.myapps.com``, and the controller will be available to the Deis client at ``deis.myapps.com``.
 
-This record is necessary for all deployments of Deis (EC2, Rackspace, DigitalOcean, Google Compute Engine, bare metal, etc.). Local clusters can use the domain ``local.deisapp.com``, ``local3.deisapp.com``, or ``local5.deiaspp.com``.
+`EC2 recommends`_ against creating "A" record entries; instead, create a wildcard "CNAME" record entry for the load balancer's DNS name, or use Amazon `Route 53`_.
+
+These records are necessary for all deployments of Deis other than Vagrant clusters.
 
 .. _xip_io:
 
@@ -42,4 +54,6 @@ You would then create the cluster with ``10.21.12.2.xip.io`` as the cluster doma
 
 Note that xip does not seem to work for EC2 ELBs - you will have to use an actual DNS record.
 
+.. _`EC2 recommends`: https://docs.aws.amazon.com/ElasticLoadBalancing/latest/DeveloperGuide/using-domain-names-with-elb.html
+.. _`Route 53`: http://aws.amazon.com/route53/
 .. _`xip`: http://xip.io/

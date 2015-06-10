@@ -1,3 +1,4 @@
 package version
 
-const Version = "1.0.1+git"
+// Version identifies this Deis product revision.
+const Version = "1.8.0-dev"

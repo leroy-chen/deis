@@ -50,8 +50,6 @@ class AppTest(TestCase):
         self.assertEqual(response.status_code, 201)
         app_id = response.data['id']  # noqa
         self.assertIn('id', response.data)
-        self.assertIn('url', response.data)
-        self.assertEqual(response.data['url'], '{app_id}.deisapp.local'.format(**locals()))
         response = self.client.get('/v1/apps',
                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
         self.assertEqual(response.status_code, 200)
@@ -68,6 +66,22 @@ class AppTest(TestCase):
                                       HTTP_AUTHORIZATION='token {}'.format(self.token))
         self.assertEqual(response.status_code, 204)
 
+    def test_response_data(self):
+        """Test that the serialized response contains only relevant data."""
+        body = {'id': 'test'}
+        response = self.client.post('/v1/apps', json.dumps(body),
+                                    content_type='application/json',
+                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
+        for key in response.data:
+            self.assertIn(key, ['uuid', 'created', 'updated', 'id', 'owner', 'url', 'structure'])
+        expected = {
+            'id': 'test',
+            'owner': self.user.username,
+            'url': 'test.deisapp.local',
+            'structure': {}
+        }
+        self.assertDictContainsSubset(expected, response.data)
+
     def test_app_override_id(self):
         body = {'id': 'myid'}
         response = self.client.post('/v1/apps', json.dumps(body),
@@ -78,7 +92,7 @@ class AppTest(TestCase):
         response = self.client.post('/v1/apps', json.dumps(body),
                                     content_type='application/json',
                                     HTTP_AUTHORIZATION='token {}'.format(self.token))
-        self.assertContains(response, 'App with this Id already exists.', status_code=400)
+        self.assertContains(response, 'This field must be unique.', status_code=400)
         return response
 
     def test_app_actions(self):
@@ -107,6 +121,13 @@ class AppTest(TestCase):
                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data, FAKE_LOG_DATA)
+
+        # test with log_lines
+        response = self.client.get(url + "?log_lines=1",
+                                   HTTP_AUTHORIZATION='token {}'.format(self.token))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, FAKE_LOG_DATA.splitlines(True)[4])
+
         os.remove(path)
         # TODO: test run needs an initial build
 
@@ -135,10 +156,6 @@ class AppTest(TestCase):
                                     HTTP_AUTHORIZATION='token {}'.format(self.token))
         self.assertContains(response, 'App IDs can only contain [a-z0-9-]', status_code=400)
         url = '/v1/apps'
-        body = {'id': 'deis'}
-        response = self.client.post(url, json.dumps(body), content_type='application/json',
-                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
-        self.assertContains(response, "App IDs cannot be 'deis'", status_code=400)
         body = {'id': app_id}
         response = self.client.post(url, json.dumps(body), content_type='application/json',
                                     HTTP_AUTHORIZATION='token {}'.format(self.token))
@@ -153,6 +170,20 @@ class AppTest(TestCase):
             response = self.client.get(url,
                                        HTTP_AUTHORIZATION='token {}'.format(self.token))
             self.assertEquals(response.status_code, 404)
+
+    def test_app_reserved_names(self):
+        """Nobody should be able to create applications with names which are reserved."""
+        url = '/v1/apps'
+        reserved_names = ['foo', 'bar']
+        with self.settings(DEIS_RESERVED_NAMES=reserved_names):
+            for name in reserved_names:
+                body = {'id': name}
+                response = self.client.post(url, json.dumps(body), content_type='application/json',
+                                            HTTP_AUTHORIZATION='token {}'.format(self.token))
+                self.assertContains(
+                    response,
+                    '{} is a reserved name.'.format(name),
+                    status_code=400)
 
     def test_app_structure_is_valid_json(self):
         """Application structures should be valid JSON objects."""
@@ -233,7 +264,8 @@ class AppTest(TestCase):
         response = self.client.post(url, json.dumps(body), content_type='application/json',
                                     HTTP_AUTHORIZATION='token {}'.format(self.token))
         self.assertEquals(response.status_code, 400)
-        self.assertEquals(response.data, 'Support for admin commands is not configured')
+        self.assertEquals(response.data, {'detail': 'Support for admin commands '
+                                                    'is not configured'})
 
     def test_run_without_release_should_error(self):
         """
@@ -250,8 +282,47 @@ class AppTest(TestCase):
         response = self.client.post(url, json.dumps(body), content_type='application/json',
                                     HTTP_AUTHORIZATION='token {}'.format(self.token))
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.data, "No build associated with this release "
-                                        "to run this command")
+        self.assertEqual(response.data, {'detail': 'No build associated with this '
+                                                   'release to run this command'})
+
+    def test_unauthorized_user_cannot_see_app(self):
+        """
+        An unauthorized user should not be able to access an app's resources.
+
+        Since an unauthorized user can't access the application, these
+        tests should return a 403, but currently return a 404. FIXME!
+        """
+        app_id = 'autotest'
+        base_url = '/v1/apps'
+        body = {'id': app_id}
+        response = self.client.post(base_url, json.dumps(body), content_type='application/json',
+                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
+        unauthorized_user = User.objects.get(username='autotest2')
+        unauthorized_token = Token.objects.get(user=unauthorized_user).key
+        url = '{}/{}/run'.format(base_url, app_id)
+        body = {'command': 'foo'}
+        response = self.client.post(url, json.dumps(body), content_type='application/json',
+                                    HTTP_AUTHORIZATION='token {}'.format(unauthorized_token))
+        self.assertEqual(response.status_code, 403)
+        url = '{}/{}/logs'.format(base_url, app_id)
+        response = self.client.get(url, HTTP_AUTHORIZATION='token {}'.format(unauthorized_token))
+        self.assertEqual(response.status_code, 403)
+        url = '{}/{}'.format(base_url, app_id)
+        response = self.client.get(url, HTTP_AUTHORIZATION='token {}'.format(unauthorized_token))
+        self.assertEqual(response.status_code, 403)
+        response = self.client.delete(url,
+                                      HTTP_AUTHORIZATION='token {}'.format(unauthorized_token))
+        self.assertEqual(response.status_code, 403)
+
+    def test_app_info_not_showing_wrong_app(self):
+        app_id = 'autotest'
+        base_url = '/v1/apps'
+        body = {'id': app_id}
+        response = self.client.post(base_url, json.dumps(body), content_type='application/json',
+                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
+        url = '{}/foo'.format(base_url)
+        response = self.client.get(url, HTTP_AUTHORIZATION='token {}'.format(self.token))
+        self.assertEqual(response.status_code, 404)
 
 
 FAKE_LOG_DATA = """

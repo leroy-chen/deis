@@ -54,7 +54,7 @@ def main():
 
     gce_user_data = get_file("gce-user-data", "w", True)
     gce_template = get_file("gce-user-data-template")
-    coreos_template = get_file("../coreos/user-data")
+    coreos_template = get_file("../coreos/user-data.example")
 
     configuration_coreos_template = yaml.safe_load(coreos_template)
     configuration_gce_template = yaml.safe_load(gce_template)
@@ -62,7 +62,7 @@ def main():
     configuration = combine_dicts(configuration_coreos_template,
                                   configuration_gce_template)
 
-    configuration["coreos"]["etcd"]["discovery_url"] = url
+    configuration["coreos"]["etcd"]["discovery"] = url
 
     with gce_user_data as outfile:
         try:

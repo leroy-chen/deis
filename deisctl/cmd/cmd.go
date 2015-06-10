@@ -6,7 +6,6 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -16,6 +15,7 @@ import (
 
 	"github.com/deis/deis/deisctl/backend"
 	"github.com/deis/deis/deisctl/config"
+	"github.com/deis/deis/deisctl/units"
 	"github.com/deis/deis/deisctl/utils"
 
 	docopt "github.com/docopt/docopt-go"
@@ -24,6 +24,7 @@ import (
 const (
 	// PlatformCommand is shorthand for "all the Deis components."
 	PlatformCommand string = "platform"
+	swarm           string = "swarm"
 )
 
 // ListUnits prints a list of installed units.
@@ -47,11 +48,11 @@ func ListUnitFiles(argv []string, b backend.Backend) error {
 }
 
 // Scale grows or shrinks the number of running components.
-// Currently "router" is the only type that can be scaled.
+// Currently "router", "registry" and "store-gateway" are the only types that can be scaled.
 func Scale(argv []string, b backend.Backend) error {
 	usage := `Grows or shrinks the number of running components.
 
-Currently "router" is the only type that can be scaled.
+Currently "router", "registry" and "store-gateway" are the only types that can be scaled.
 
 Usage:
   deisctl scale [<target>...] [options]
@@ -75,13 +76,14 @@ Usage:
 			return err
 		}
 		// the router is the only component that can scale at the moment
-		if !strings.Contains(component, "router") {
+		if !strings.Contains(component, "router") && !strings.Contains(component, "registry") && !strings.Contains(component, "store-gateway") {
 			return fmt.Errorf("cannot scale %s components", component)
 		}
 		b.Scale(component, num, &wg, outchan, errchan)
 		wg.Wait()
 	}
 	close(outchan)
+	close(errchan)
 	return nil
 }
 
@@ -101,10 +103,14 @@ Usage:
 	// if target is platform, install all services
 	targets := args["<target>"].([]string)
 
-	if len(targets) == 1 && targets[0] == PlatformCommand {
-		return StartPlatform(b)
+	if len(targets) == 1 {
+		if targets[0] == PlatformCommand {
+			return StartPlatform(b)
+		}
+		if targets[0] == swarm {
+			return StartSwarm(b)
+		}
 	}
-
 	outchan := make(chan string)
 	errchan := make(chan error)
 	var wg sync.WaitGroup
@@ -114,6 +120,7 @@ Usage:
 	b.Start(targets, &wg, outchan, errchan)
 	wg.Wait()
 	close(outchan)
+	close(errchan)
 
 	return nil
 }
@@ -130,28 +137,6 @@ deisctl config platform set domain=<your-domain>`)
 deisctl config platform set sshPrivateKey=<path-to-key>
 `)
 	}
-	return nil
-}
-
-// StartPlatform activates all components.
-func StartPlatform(b backend.Backend) error {
-
-	outchan := make(chan string)
-	errchan := make(chan error)
-	var wg sync.WaitGroup
-
-	go printState(outchan, errchan, 500*time.Millisecond)
-
-	outchan <- utils.DeisIfy("Starting Deis...")
-
-	startDefaultServices(b, &wg, outchan, errchan)
-
-	wg.Wait()
-	close(outchan)
-
-	fmt.Println("Done.")
-	fmt.Println()
-	fmt.Println("Please use `deis register` to setup an administrator account.")
 	return nil
 }
 
@@ -172,7 +157,7 @@ func startDefaultServices(b backend.Backend, wg *sync.WaitGroup, outchan chan st
 	wg.Wait()
 
 	// we start gateway first to give metadata time to come up for volume
-	b.Start([]string{"store-gateway"}, wg, outchan, errchan)
+	b.Start([]string{"store-gateway@*"}, wg, outchan, errchan)
 	wg.Wait()
 	b.Start([]string{"store-volume"}, wg, outchan, errchan)
 	wg.Wait()
@@ -184,14 +169,13 @@ func startDefaultServices(b backend.Backend, wg *sync.WaitGroup, outchan chan st
 	b.Start([]string{"logspout"}, wg, outchan, errchan)
 	wg.Wait()
 
-	// optimization: start all remaining services in the background
 	b.Start([]string{
-		"cache", "database", "registry", "controller", "builder",
-		"publisher", "router@1", "router@2", "router@3"},
+		"database", "registry@*", "controller", "builder",
+		"publisher", "router@*"},
 		&_wg, _outchan, _errchan)
 
 	outchan <- fmt.Sprintf("Control plane...")
-	b.Start([]string{"cache", "database", "registry", "controller"}, wg, outchan, errchan)
+	b.Start([]string{"database", "registry@*", "controller"}, wg, outchan, errchan)
 	wg.Wait()
 	b.Start([]string{"builder"}, wg, outchan, errchan)
 	wg.Wait()
@@ -201,7 +185,7 @@ func startDefaultServices(b backend.Backend, wg *sync.WaitGroup, outchan chan st
 	wg.Wait()
 
 	outchan <- fmt.Sprintf("Routing mesh...")
-	b.Start([]string{"router@1", "router@2", "router@3"}, wg, outchan, errchan)
+	b.Start([]string{"router@*"}, wg, outchan, errchan)
 	wg.Wait()
 }
 
@@ -220,8 +204,13 @@ Usage:
 	targets := args["<target>"].([]string)
 
 	// if target is platform, stop all services
-	if len(targets) == 1 && targets[0] == PlatformCommand {
-		return StopPlatform(b)
+	if len(targets) == 1 {
+		if targets[0] == PlatformCommand {
+			return StopPlatform(b)
+		}
+		if targets[0] == swarm {
+			return StopSwarm(b)
+		}
 	}
 
 	outchan := make(chan string)
@@ -233,36 +222,15 @@ Usage:
 	b.Stop(targets, &wg, outchan, errchan)
 	wg.Wait()
 	close(outchan)
+	close(errchan)
 
-	return nil
-}
-
-// StopPlatform deactivates all components.
-func StopPlatform(b backend.Backend) error {
-
-	outchan := make(chan string)
-	errchan := make(chan error)
-	var wg sync.WaitGroup
-
-	go printState(outchan, errchan, 500*time.Millisecond)
-
-	outchan <- utils.DeisIfy("Stopping Deis...")
-
-	stopDefaultServices(b, &wg, outchan, errchan)
-
-	wg.Wait()
-	close(outchan)
-
-	fmt.Println("Done.")
-	fmt.Println()
-	fmt.Println("Please run `deisctl start platform` to restart Deis.")
 	return nil
 }
 
 func stopDefaultServices(b backend.Backend, wg *sync.WaitGroup, outchan chan string, errchan chan error) {
 
 	outchan <- fmt.Sprintf("Routing mesh...")
-	b.Stop([]string{"router@1", "router@2", "router@3"}, wg, outchan, errchan)
+	b.Stop([]string{"router@*"}, wg, outchan, errchan)
 	wg.Wait()
 
 	outchan <- fmt.Sprintf("Data plane...")
@@ -270,7 +238,7 @@ func stopDefaultServices(b backend.Backend, wg *sync.WaitGroup, outchan chan str
 	wg.Wait()
 
 	outchan <- fmt.Sprintf("Control plane...")
-	b.Stop([]string{"controller", "builder", "cache", "database", "registry"}, wg, outchan, errchan)
+	b.Stop([]string{"controller", "builder", "database", "registry@*"}, wg, outchan, errchan)
 	wg.Wait()
 
 	outchan <- fmt.Sprintf("Logging subsystem...")
@@ -278,7 +246,7 @@ func stopDefaultServices(b backend.Backend, wg *sync.WaitGroup, outchan chan str
 	wg.Wait()
 
 	outchan <- fmt.Sprintf("Storage subsystem...")
-	b.Stop([]string{"store-volume", "store-gateway"}, wg, outchan, errchan)
+	b.Stop([]string{"store-volume", "store-gateway@*"}, wg, outchan, errchan)
 	wg.Wait()
 	b.Stop([]string{"store-metadata"}, wg, outchan, errchan)
 	wg.Wait()
@@ -374,12 +342,16 @@ Usage:
 		return err
 	}
 
-	// if target is platform, install all services
 	targets := args["<target>"].([]string)
-	if len(targets) == 1 && targets[0] == PlatformCommand {
-		return InstallPlatform(b)
+	// if target is platform, install all services
+	if len(targets) == 1 {
+		if targets[0] == PlatformCommand {
+			return InstallPlatform(b)
+		}
+		if targets[0] == swarm {
+			return InstallSwarm(b)
+		}
 	}
-
 	outchan := make(chan string)
 	errchan := make(chan error)
 	var wg sync.WaitGroup
@@ -391,40 +363,14 @@ Usage:
 	wg.Wait()
 
 	close(outchan)
-	return nil
-}
-
-// InstallPlatform loads all components' definitions from local unit files.
-// After InstallPlatform, all components will be available for StartPlatform.
-func InstallPlatform(b backend.Backend) error {
-
-	if err := checkRequiredKeys(); err != nil {
-		return err
-	}
-
-	outchan := make(chan string)
-	errchan := make(chan error)
-	var wg sync.WaitGroup
-
-	go printState(outchan, errchan, 500*time.Millisecond)
-
-	outchan <- utils.DeisIfy("Installing Deis...")
-
-	installDefaultServices(b, &wg, outchan, errchan)
-
-	wg.Wait()
-	close(outchan)
-
-	fmt.Println("Done.")
-	fmt.Println()
-	fmt.Println("Please run `deisctl start platform` to boot up Deis.")
+	close(errchan)
 	return nil
 }
 
 func installDefaultServices(b backend.Backend, wg *sync.WaitGroup, outchan chan string, errchan chan error) {
 
 	outchan <- fmt.Sprintf("Storage subsystem...")
-	b.Create([]string{"store-daemon", "store-monitor", "store-metadata", "store-volume", "store-gateway"}, wg, outchan, errchan)
+	b.Create([]string{"store-daemon", "store-monitor", "store-metadata", "store-volume", "store-gateway@1"}, wg, outchan, errchan)
 	wg.Wait()
 
 	outchan <- fmt.Sprintf("Logging subsystem...")
@@ -432,7 +378,7 @@ func installDefaultServices(b backend.Backend, wg *sync.WaitGroup, outchan chan 
 	wg.Wait()
 
 	outchan <- fmt.Sprintf("Control plane...")
-	b.Create([]string{"cache", "database", "registry", "controller", "builder"}, wg, outchan, errchan)
+	b.Create([]string{"database", "registry@1", "controller", "builder"}, wg, outchan, errchan)
 	wg.Wait()
 
 	outchan <- fmt.Sprintf("Data plane...")
@@ -462,8 +408,13 @@ Usage:
 
 	// if target is platform, uninstall all services
 	targets := args["<target>"].([]string)
-	if len(targets) == 1 && targets[0] == PlatformCommand {
-		return UninstallPlatform(b)
+	if len(targets) == 1 {
+		if targets[0] == PlatformCommand {
+			return UninstallPlatform(b)
+		}
+		if targets[0] == swarm {
+			return UnInstallSwarm(b)
+		}
 	}
 
 	outchan := make(chan string)
@@ -476,35 +427,15 @@ Usage:
 	b.Destroy(targets, &wg, outchan, errchan)
 	wg.Wait()
 	close(outchan)
+	close(errchan)
 
-	return nil
-}
-
-// UninstallPlatform unloads all components' definitions.
-// After UninstallPlatform, all components will be unavailable.
-func UninstallPlatform(b backend.Backend) error {
-
-	outchan := make(chan string)
-	errchan := make(chan error)
-	var wg sync.WaitGroup
-
-	go printState(outchan, errchan, 500*time.Millisecond)
-
-	outchan <- utils.DeisIfy("Uninstalling Deis...")
-
-	uninstallAllServices(b, &wg, outchan, errchan)
-
-	wg.Wait()
-	close(outchan)
-
-	fmt.Println("Done.")
 	return nil
 }
 
 func uninstallAllServices(b backend.Backend, wg *sync.WaitGroup, outchan chan string, errchan chan error) error {
 
 	outchan <- fmt.Sprintf("Routing mesh...")
-	b.Destroy([]string{"router@1", "router@2", "router@3"}, wg, outchan, errchan)
+	b.Destroy([]string{"router@*"}, wg, outchan, errchan)
 	wg.Wait()
 
 	outchan <- fmt.Sprintf("Data plane...")
@@ -512,7 +443,7 @@ func uninstallAllServices(b backend.Backend, wg *sync.WaitGroup, outchan chan st
 	wg.Wait()
 
 	outchan <- fmt.Sprintf("Control plane...")
-	b.Destroy([]string{"controller", "builder", "cache", "database", "registry"}, wg, outchan, errchan)
+	b.Destroy([]string{"controller", "builder", "database", "registry@*"}, wg, outchan, errchan)
 	wg.Wait()
 
 	outchan <- fmt.Sprintf("Logging subsystem...")
@@ -520,7 +451,7 @@ func uninstallAllServices(b backend.Backend, wg *sync.WaitGroup, outchan chan st
 	wg.Wait()
 
 	outchan <- fmt.Sprintf("Storage subsystem...")
-	b.Destroy([]string{"store-volume", "store-gateway"}, wg, outchan, errchan)
+	b.Destroy([]string{"store-volume", "store-gateway@*"}, wg, outchan, errchan)
 	wg.Wait()
 	b.Destroy([]string{"store-metadata"}, wg, outchan, errchan)
 	wg.Wait()
@@ -532,20 +463,26 @@ func uninstallAllServices(b backend.Backend, wg *sync.WaitGroup, outchan chan st
 	return nil
 }
 
-func printState(outchan chan string, errchan chan error, interval time.Duration) error {
+func printState(outchan chan string, errchan chan error, interval time.Duration) {
 	for {
 		select {
-		case out := <-outchan:
-			// done on closed channel
-			if out == "" {
-				return nil
+		case out, ok := <-outchan:
+			if !ok {
+				outchan = nil
 			}
-			fmt.Println(out)
-		case err := <-errchan:
+			if out != "" {
+				fmt.Println(out)
+			}
+		case err, ok := <-errchan:
+			if !ok {
+				errchan = nil
+			}
 			if err != nil {
 				fmt.Println(err.Error())
-				return err
 			}
+		}
+		if outchan == nil && errchan == nil {
+			break
 		}
 		time.Sleep(interval)
 	}
@@ -579,12 +516,19 @@ A configuration value is stored and retrieved from a key/value store
 values are typically used for component-level configuration, such as
 enabling TLS for the routers.
 
-Usage:
-  deisctl config <target> get [<key>...] [options]
-  deisctl config <target> set <key=val>... [options]
+Note: "deisctl config platform set sshPrivateKey=" expects a path
+to a private key.
 
-Options:
-  --verbose		print out the request bodies [default: false]
+Usage:
+  deisctl config <target> get [<key>...]
+  deisctl config <target> set <key=val>...
+  deisctl config <target> rm [<key>...]
+
+Examples:
+  deisctl config platform set domain=mydomain.com
+  deisctl config platform set sshPrivateKey=$HOME/.ssh/deis
+  deisctl config controller get webEnabled
+  deisctl config controller rm webEnabled
 `
 	// parse command-line arguments
 	args, err := docopt.Parse(usage, argv, true, "", false)
@@ -626,9 +570,7 @@ Options:
 		os.Exit(2)
 	}
 	dir := args["--path"].(string)
-	if dir == "$HOME/.deis/units" || dir == "~/.deis/units" {
-		dir = path.Join(os.Getenv("HOME"), ".deis", "units")
-	}
+	dir = utils.ResolvePath(dir)
 	// create the target dir if necessary
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
@@ -636,24 +578,8 @@ Options:
 	// download and save the unit files to the specified path
 	rootURL := "https://raw.githubusercontent.com/deis/deis/"
 	tag := args["--tag"].(string)
-	units := []string{
-		"deis-builder.service",
-		"deis-cache.service",
-		"deis-controller.service",
-		"deis-database.service",
-		"deis-logger.service",
-		"deis-logspout.service",
-		"deis-publisher.service",
-		"deis-registry.service",
-		"deis-router.service",
-		"deis-store-daemon.service",
-		"deis-store-gateway.service",
-		"deis-store-metadata.service",
-		"deis-store-monitor.service",
-		"deis-store-volume.service",
-	}
-	for _, unit := range units {
-		src := rootURL + tag + "/deisctl/units/" + unit
+	for _, unit := range units.Names {
+		src := rootURL + tag + "/deisctl/units/" + unit + ".service"
 		dest := filepath.Join(dir, unit)
 		res, err := http.Get(src)
 		if err != nil {
@@ -672,5 +598,25 @@ Options:
 		}
 		fmt.Printf("Refreshed %s from %s\n", unit, tag)
 	}
+	return nil
+}
+
+// SSH opens an interactive shell on a machine in the cluster
+func SSH(argv []string, b backend.Backend) error {
+	usage := `Open an interactive shell on a machine in the cluster given a unit or machine id.
+
+Usage:
+  deisctl ssh <target>
+`
+	// parse command-line arguments
+	args, err := docopt.Parse(usage, argv, true, "", false)
+	if err != nil {
+		return err
+	}
+
+	if err := b.SSH(args["<target>"].(string)); err != nil {
+		return err
+	}
+
 	return nil
 }

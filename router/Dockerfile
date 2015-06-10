@@ -1,25 +1,14 @@
-FROM ubuntu-debootstrap:14.04
-
-ENV DEBIAN_FRONTEND noninteractive
+FROM alpine:3.1
 
 # install common packages
-RUN apt-get update && apt-get install -y curl net-tools sudo
+RUN apk add --update-cache curl bash sudo && rm -rf /var/cache/apk/*
 
-# install confd
-RUN curl -sSL -o /usr/local/bin/confd https://s3-us-west-2.amazonaws.com/opdemand/confd-git-b8e693c \
-    && chmod +x /usr/local/bin/confd
+ADD firewall /tmp/firewall
 
-# install common packages
-RUN apt-get update && apt-get install -y libgeoip1
+ADD build.sh /tmp/build.sh
 
-WORKDIR /app
+WORKDIR /tmp
 
-EXPOSE 80 2222
+RUN mkdir -p /opt/nginx && DOCKER_BUILD=true /tmp/build.sh
 
-CMD ["/app/bin/boot"]
-
-ADD . /app
-
-ADD nginx.tgz /opt/nginx
-
-RUN rm nginx.tgz
+RUN tar -C /opt/nginx -czf /nginx.tgz .

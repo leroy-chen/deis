@@ -112,6 +112,31 @@ class ReleaseTest(TransactionTestCase):
         return release3
 
     @mock.patch('requests.post', mock_import_repository_task)
+    def test_response_data(self):
+        body = {'id': 'test'}
+        response = self.client.post('/v1/apps', json.dumps(body),
+                                    content_type='application/json',
+                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
+        body = {'values': json.dumps({'NEW_URL': 'http://localhost:8080/'})}
+        config_response = self.client.post('/v1/apps/test/config', json.dumps(body),
+                                           content_type='application/json',
+                                           HTTP_AUTHORIZATION='token {}'.format(self.token))
+        url = '/v1/apps/test/releases/v2'
+        response = self.client.get(url, HTTP_AUTHORIZATION='token {}'.format(self.token))
+        for key in response.data.keys():
+            self.assertIn(key, ['uuid', 'owner', 'created', 'updated', 'app', 'build', 'config',
+                                'summary', 'version'])
+        expected = {
+            'owner': self.user.username,
+            'app': 'test',
+            'build': None,
+            'config': config_response.data['uuid'],
+            'summary': '{} added NEW_URL'.format(self.user.username),
+            'version': 2
+        }
+        self.assertDictContainsSubset(expected, response.data)
+
+    @mock.patch('requests.post', mock_import_repository_task)
     def test_release_rollback(self):
         url = '/v1/apps'
         response = self.client.post(url, HTTP_AUTHORIZATION='token {}'.format(self.token))
@@ -122,6 +147,8 @@ class ReleaseTest(TransactionTestCase):
         response = self.client.post(url, content_type='application/json',
                                     HTTP_AUTHORIZATION='token {}'.format(self.token))
         self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data, {'detail': 'version cannot be below 0'})
+        self.assertEqual(response.get('content-type'), 'application/json')
         # update config to roll a new release
         url = '/v1/apps/{app_id}/config'.format(**locals())
         body = {'values': json.dumps({'NEW_URL1': 'http://localhost:8080/'})}
@@ -244,3 +271,35 @@ class ReleaseTest(TransactionTestCase):
         self.assertEqual(response.status_code, 200)
         # account for the config release as well
         self.assertEqual(response.data['count'], 2)
+
+    @mock.patch('requests.post', mock_import_repository_task)
+    def test_unauthorized_user_cannot_modify_release(self):
+        """
+        An unauthorized user should not be able to modify other releases.
+
+        Since an unauthorized user should not know about the application at all, these
+        requests should return a 404.
+        """
+        app_id = 'autotest'
+        base_url = '/v1/apps'
+        body = {'id': app_id}
+        response = self.client.post(base_url, json.dumps(body), content_type='application/json',
+                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
+        # push a new build
+        url = '{base_url}/{app_id}/builds'.format(**locals())
+        body = {'image': 'test'}
+        response = self.client.post(
+            url, json.dumps(body), content_type='application/json',
+            HTTP_AUTHORIZATION='token {}'.format(self.token))
+        # update config to roll a new release
+        url = '{base_url}/{app_id}/config'.format(**locals())
+        body = {'values': json.dumps({'NEW_URL1': 'http://localhost:8080/'})}
+        response = self.client.post(
+            url, json.dumps(body), content_type='application/json',
+            HTTP_AUTHORIZATION='token {}'.format(self.token))
+        unauthorized_user = User.objects.get(username='autotest2')
+        unauthorized_token = Token.objects.get(user=unauthorized_user).key
+        # try to rollback
+        url = '{base_url}/{app_id}/releases/rollback/'.format(**locals())
+        response = self.client.post(url, HTTP_AUTHORIZATION='token {}'.format(unauthorized_token))
+        self.assertEqual(response.status_code, 403)

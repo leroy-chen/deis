@@ -30,13 +30,13 @@ class SchedulerTest(TransactionTestCase):
         chaos.START_ERROR_RATE = 0
         chaos.STOP_ERROR_RATE = 0
         # use chaos scheduler
-        settings.SCHEDULER_MODULE = 'chaos'
+        settings.SCHEDULER_MODULE = 'scheduler.chaos'
         # provide mock authentication used for run commands
         settings.SSH_PRIVATE_KEY = '<some-ssh-private-key>'
 
     def tearDown(self):
         # reset for subsequent tests
-        settings.SCHEDULER_MODULE = 'mock'
+        settings.SCHEDULER_MODULE = 'scheduler.mock'
         settings.SSH_PRIVATE_KEY = ''
 
     def test_create_chaos(self):
@@ -69,6 +69,8 @@ class SchedulerTest(TransactionTestCase):
         response = self.client.post(url, json.dumps(body), content_type='application/json',
                                     HTTP_AUTHORIZATION='token {}'.format(self.token))
         self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data, {'detail': 'aborting, failed to create some containers'})
+        self.assertEqual(response.get('content-type'), 'application/json')
         # inspect broken containers
         url = "/v1/apps/{app_id}/containers".format(**locals())
         response = self.client.get(url, HTTP_AUTHORIZATION='token {}'.format(self.token))
@@ -117,6 +119,75 @@ class SchedulerTest(TransactionTestCase):
         states = set([c['state'] for c in response.data['results']])
         self.assertEqual(states, set(['crashed', 'up']))
 
+    def test_restart_chaos(self):
+        url = '/v1/apps'
+        response = self.client.post(url, HTTP_AUTHORIZATION='token {}'.format(self.token))
+        self.assertEqual(response.status_code, 201)
+        app_id = response.data['id']
+        # post a new build
+        url = "/v1/apps/{app_id}/builds".format(**locals())
+        body = {'image': 'autotest/example', 'sha': 'a'*40,
+                'procfile': json.dumps({'web': 'node server.js', 'worker': 'node worker.js'})}
+        response = self.client.post(url, json.dumps(body), content_type='application/json',
+                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
+        self.assertEqual(response.status_code, 201)
+        url = "/v1/apps/{app_id}/containers".format(**locals())
+        response = self.client.get(url, HTTP_AUTHORIZATION='token {}'.format(self.token))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data['results']), 1)
+        # scale up, which will allow some crashed containers
+        url = "/v1/apps/{app_id}/scale".format(**locals())
+        body = {'web': 20, 'worker': 20}
+        response = self.client.post(url, json.dumps(body), content_type='application/json',
+                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
+        self.assertEqual(response.status_code, 204)
+        # let's get chaotic
+        chaos.STOP_ERROR_RATE = 0.5
+        chaos.START_ERROR_RATE = 0.5
+        # reboot the web processes
+        url = "/v1/apps/{app_id}/containers/web/restart".format(**locals())
+        response = self.client.post(url,
+                                    content_type='application/json',
+                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
+        self.assertEqual(response.status_code, 200, response.data)
+        # inspect broken containers
+        url = "/v1/apps/{app_id}/containers".format(**locals())
+        response = self.client.get(url, HTTP_AUTHORIZATION='token {}'.format(self.token))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data['count'], 40)
+        # make sure some failed
+        states = set([c['state'] for c in response.data['results']])
+        self.assertEqual(states, set(['crashed', 'up']))
+        # make sure that we only rebooted the web processes
+        types = set([c['type'] for c in response.data['results'] if c['state'] == 'crashed'])
+        self.assertEqual(types, set(['web']))
+        # start fresh
+        chaos.STOP_ERROR_RATE = 0.0
+        chaos.START_ERROR_RATE = 0.0
+        url = "/v1/apps/{app_id}/containers/web/restart".format(**locals())
+        response = self.client.post(url,
+                                    content_type='application/json',
+                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
+        # let the carnage continue
+        chaos.STOP_ERROR_RATE = 0.5
+        chaos.START_ERROR_RATE = 0.5
+        # reboot ALL the containers!
+        url = "/v1/apps/{app_id}/containers/restart".format(**locals())
+        response = self.client.post(url,
+                                    content_type='application/json',
+                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
+        self.assertEqual(response.status_code, 200)
+        # inspect broken containers
+        url = "/v1/apps/{app_id}/containers".format(**locals())
+        response = self.client.get(url, HTTP_AUTHORIZATION='token {}'.format(self.token))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data['results']), 40)
+        # make sure some failed
+        states = set([c['state'] for c in response.data['results']])
+        self.assertEqual(states, set(['crashed', 'up']))
+        types = set([c['type'] for c in response.data['results']])
+        self.assertEqual(types, set(['web', 'worker']))
+
     def test_destroy_chaos(self):
         url = '/v1/apps'
         response = self.client.post(url, HTTP_AUTHORIZATION='token {}'.format(self.token))
@@ -151,6 +222,8 @@ class SchedulerTest(TransactionTestCase):
         response = self.client.post(url, json.dumps(body), content_type='application/json',
                                     HTTP_AUTHORIZATION='token {}'.format(self.token))
         self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data, {'detail': 'aborting, failed to destroy some containers'})
+        self.assertEqual(response.get('content-type'), 'application/json')
         # inspect broken containers
         url = "/v1/apps/{app_id}/containers".format(**locals())
         response = self.client.get(url, HTTP_AUTHORIZATION='token {}'.format(self.token))
@@ -159,7 +232,7 @@ class SchedulerTest(TransactionTestCase):
         self.assertEqual(states, set(['error']))
         # make sure we can cleanup after enough tries
         containers = 20
-        for _ in range(100):
+        for _ in xrange(100):
             url = "/v1/apps/{app_id}/scale".format(**locals())
             body = {'web': 0}
             response = self.client.post(url, json.dumps(body), content_type='application/json',
@@ -167,7 +240,10 @@ class SchedulerTest(TransactionTestCase):
             # break if we destroyed successfully
             if response.status_code == 204:
                 break
-            self.assertEquals(response.status_code, 503)
+            self.assertEqual(response.status_code, 503)
+            self.assertEqual(response.data, {'detail': 'aborting, failed to '
+                                                       'destroy some containers'})
+            self.assertEqual(response.get('content-type'), 'application/json')
             # inspect broken containers
             url = "/v1/apps/{app_id}/containers".format(**locals())
             response = self.client.get(url, HTTP_AUTHORIZATION='token {}'.format(self.token))
@@ -216,6 +292,8 @@ class SchedulerTest(TransactionTestCase):
         response = self.client.post(url, json.dumps(body), content_type='application/json',
                                     HTTP_AUTHORIZATION='token {}'.format(self.token))
         self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data, {'detail': 'aborting, failed to create some containers'})
+        self.assertEqual(response.get('content-type'), 'application/json')
         # inspect releases
         url = "/v1/apps/{app_id}/releases".format(**locals())
         response = self.client.get(url, HTTP_AUTHORIZATION='token {}'.format(self.token))
@@ -267,6 +345,8 @@ class SchedulerTest(TransactionTestCase):
         response = self.client.post(url, json.dumps(body), content_type='application/json',
                                     HTTP_AUTHORIZATION='token {}'.format(self.token))
         self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data, {'detail': 'aborting, failed to create some containers'})
+        self.assertEqual(response.get('content-type'), 'application/json')
         # inspect releases
         url = "/v1/apps/{app_id}/releases".format(**locals())
         response = self.client.get(url, HTTP_AUTHORIZATION='token {}'.format(self.token))
@@ -315,3 +395,5 @@ class SchedulerTest(TransactionTestCase):
         response = self.client.post(url, json.dumps(body), content_type='application/json',
                                     HTTP_AUTHORIZATION='token {}'.format(self.token))
         self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.data, {'detail': 'exit code 1'})
+        self.assertEqual(response.get('content-type'), 'application/json')

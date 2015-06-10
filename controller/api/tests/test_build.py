@@ -83,6 +83,32 @@ class BuildTest(TransactionTestCase):
         self.assertEqual(response.status_code, 405)
 
     @mock.patch('requests.post', mock_import_repository_task)
+    def test_response_data(self):
+        """Test that the serialized response contains only relevant data."""
+        body = {'id': 'test'}
+        url = '/v1/apps'
+        response = self.client.post(url, json.dumps(body),
+                                    content_type='application/json',
+                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
+        # post an image as a build
+        url = "/v1/apps/test/builds".format(**locals())
+        body = {'image': 'autotest/example'}
+        response = self.client.post(url, json.dumps(body), content_type='application/json',
+                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
+        for key in response.data:
+            self.assertIn(key, ['uuid', 'owner', 'created', 'updated', 'app', 'dockerfile',
+                                'image', 'procfile', 'sha'])
+        expected = {
+            'owner': self.user.username,
+            'app': 'test',
+            'dockerfile': '',
+            'image': 'autotest/example',
+            'procfile': {},
+            'sha': ''
+        }
+        self.assertDictContainsSubset(expected, response.data)
+
+    @mock.patch('requests.post', mock_import_repository_task)
     def test_build_default_containers(self):
         url = '/v1/apps'
         response = self.client.post(url, HTTP_AUTHORIZATION='token {}'.format(self.token))
@@ -172,7 +198,6 @@ class BuildTest(TransactionTestCase):
     def test_build_str(self):
         """Test the text representation of a build."""
         url = '/v1/apps'
-        response = self.client.post(url)
         response = self.client.post(url, HTTP_AUTHORIZATION='token {}'.format(self.token))
         self.assertEqual(response.status_code, 201)
         app_id = response.data['id']
@@ -207,3 +232,69 @@ class BuildTest(TransactionTestCase):
         build = Build.objects.get(uuid=response.data['uuid'])
         self.assertEqual(str(build), "{}-{}".format(
                          response.data['app'], response.data['uuid'][:7]))
+
+    @mock.patch('requests.post', mock_import_repository_task)
+    def test_unauthorized_user_cannot_modify_build(self):
+        """
+        An unauthorized user should not be able to modify other builds.
+
+        Since an unauthorized user can't access the application, these
+        requests should return a 403.
+        """
+        app_id = 'autotest'
+        url = '/v1/apps'
+        body = {'id': app_id}
+        response = self.client.post(url, json.dumps(body), content_type='application/json',
+                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
+        unauthorized_user = User.objects.get(username='autotest2')
+        unauthorized_token = Token.objects.get(user=unauthorized_user).key
+        url = '{}/{}/builds'.format(url, app_id)
+        body = {'image': 'foo'}
+        response = self.client.post(url, json.dumps(body), content_type='application/json',
+                                    HTTP_AUTHORIZATION='token {}'.format(unauthorized_token))
+        self.assertEqual(response.status_code, 403)
+
+    @mock.patch('requests.post', mock_import_repository_task)
+    def test_new_build_does_not_scale_up_automatically(self):
+        """
+        After the first initial deploy, if the containers are scaled down to zero,
+        they should stay that way on a new release.
+        """
+        url = '/v1/apps'
+        response = self.client.post(url, HTTP_AUTHORIZATION='token {}'.format(self.token))
+        self.assertEqual(response.status_code, 201)
+        app_id = response.data['id']
+        # post a new build
+        url = "/v1/apps/{app_id}/builds".format(**locals())
+        body = {'image': 'autotest/example',
+                'sha': 'a'*40,
+                'procfile': json.dumps({'web': 'node server.js',
+                                        'worker': 'node worker.js'})}
+        response = self.client.post(url, json.dumps(body), content_type='application/json',
+                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
+        self.assertEqual(response.status_code, 201)
+        url = "/v1/apps/{app_id}/containers/web".format(**locals())
+        response = self.client.get(url,
+                                   HTTP_AUTHORIZATION='token {}'.format(self.token))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data['results']), 1)
+        # scale to zero
+        url = "/v1/apps/{app_id}/scale".format(**locals())
+        body = {'web': 0}
+        response = self.client.post(url, json.dumps(body), content_type='application/json',
+                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
+        self.assertEqual(response.status_code, 204)
+        # post another build
+        url = "/v1/apps/{app_id}/builds".format(**locals())
+        body = {'image': 'autotest/example',
+                'sha': 'a'*40,
+                'procfile': json.dumps({'web': 'node server.js',
+                                        'worker': 'node worker.js'})}
+        response = self.client.post(url, json.dumps(body), content_type='application/json',
+                                    HTTP_AUTHORIZATION='token {}'.format(self.token))
+        self.assertEqual(response.status_code, 201)
+        url = "/v1/apps/{app_id}/containers/web".format(**locals())
+        response = self.client.get(url,
+                                   HTTP_AUTHORIZATION='token {}'.format(self.token))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data['results']), 0)

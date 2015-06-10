@@ -1,14 +1,29 @@
 include ../includes.mk
 
-COMPONENT = builder
+# the filepath to this repository, relative to $GOPATH/src
+repo_path = github.com/deis/deis/builder
+
+GO_FILES = types.go utils.go utils_test.go
+GO_PACKAGES = src tests
+GO_PACKAGES_REPO_PATH = $(addprefix $(repo_path)/,$(GO_PACKAGES))
+
+COMPONENT = $(notdir $(repo_path))
 IMAGE = $(IMAGE_PREFIX)$(COMPONENT):$(BUILD_TAG)
 DEV_IMAGE = $(DEV_REGISTRY)/$(IMAGE)
+BINARIES := extract-domain extract-types extract-version generate-buildhook get-app-config get-app-values publish-release-controller yaml2json-procfile
+BINARY_DEST_DIR := rootfs/usr/bin
 
 build: check-docker
-	docker build -t $(IMAGE) .
+	for i in $(BINARIES); do \
+		GOOS=linux GOARCH=amd64 CGO_ENABLED=0 godep go build -a -installsuffix cgo -ldflags '-s' -o $(BINARY_DEST_DIR)/$$i src/$$i.go || exit 1; \
+		$(call check-static-binary,$(BINARY_DEST_DIR)/$$i) \
+	done
+	docker build -t $(IMAGE) rootfs
 
 clean: check-docker check-registry
-	rm -f deisctl
+	for i in $(BINARIES); do \
+		rm -rf $(BINARY_DEST_DIR)/$$i ; \
+	done
 	docker rmi $(IMAGE)
 
 full-clean: check-docker check-registry clean
@@ -33,7 +48,7 @@ run: install start
 dev-release: push set-image
 
 push: check-registry
-	docker tag $(IMAGE) $(DEV_IMAGE)
+	docker tag -f $(IMAGE) $(DEV_IMAGE)
 	docker push $(DEV_IMAGE)
 
 set-image: check-deisctl
@@ -44,11 +59,18 @@ release:
 
 deploy: build dev-release restart
 
-test: test-unit test-functional
+test: test-style test-unit test-functional
 
 test-unit:
-	@echo no unit tests
+	godep go test -v .
 
 test-functional:
 	@docker history deis/test-etcd >/dev/null 2>&1 || docker pull deis/test-etcd:latest
-	GOPATH=$(CURDIR)/../tests/_vendor:$(GOPATH) go test -v ./tests/...
+	godep go test -v ./tests/...
+
+test-style:
+# display output, then check
+	$(GOFMT) $(GO_PACKAGES) $(GO_FILES)
+	@$(GOFMT) $(GO_PACKAGES) $(GO_FILES) | read; if [ $$? == 0 ]; then echo "gofmt check failed."; exit 1; fi
+	$(GOVET) $(repo_path) $(GO_PACKAGES_REPO_PATH)
+	$(GOLINT) ./...

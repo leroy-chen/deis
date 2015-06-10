@@ -5,16 +5,24 @@ require 'fileutils'
 
 Vagrant.require_version ">= 1.6.5"
 
+unless Vagrant.has_plugin?("vagrant-triggers")
+  raise Vagrant::Errors::VagrantError.new, "Please install the vagrant-triggers plugin running 'vagrant plugin install vagrant-triggers'"
+end
+
 CLOUD_CONFIG_PATH = File.join(File.dirname(__FILE__), "contrib", "coreos", "user-data")
 CONFIG = File.join(File.dirname(__FILE__), "config.rb")
 
 # Defaults for config options defined in CONFIG
 $num_instances = 1
-$update_channel = "alpha"
+$instance_name_prefix = "deis"
+$update_channel = ENV["COREOS_CHANNEL"] || "stable"
 $enable_serial_logging = false
-$vb_gui = false
-$vb_memory = 1024
-$vb_cpus = 1
+$share_home = false
+$vm_gui = false
+$vm_memory = 2048
+$vm_cpus = 1
+$shared_folders = {}
+$forwarded_ports = {}
 
 # Attempt to apply the deprecated environment variable NUM_INSTANCES to
 # $num_instances while allowing config.rb to override it
@@ -26,37 +34,35 @@ else
   $num_instances = 3
 end
 
-# VM sizing for Deis
-if $num_instances == 1
-  $vb_memory = 4096
-  $vb_cpus = 2
-else
-  $vb_memory = 2048
-  $vb_cpus = 1
-end
-
-COREOS_VERSION = "494.0.0"
-
 if File.exist?(CONFIG)
   require CONFIG
 end
 
+# Use old vb_xxx config variables when set
+def vm_gui
+  $vb_gui.nil? ? $vm_gui : $vb_gui
+end
+
+def vm_memory
+  $vb_memory.nil? ? $vm_memory : $vb_memory
+end
+
+def vm_cpus
+  $vb_cpus.nil? ? $vm_cpus : $vb_cpus
+end
+
 Vagrant.configure("2") do |config|
-  # config.vm.box = "coreos-%s" % $update_channel
-  # config.vm.box_version = ">= 308.0.1"
-  # config.vm.box_url = "http://%s.release.core-os.net/amd64-usr/current/coreos_production_vagrant.json" % $update_channel
-  config.vm.box = "coreos-#{COREOS_VERSION}"
-  config.vm.box_url = "http://storage.core-os.net/coreos/amd64-usr/#{COREOS_VERSION}/coreos_production_vagrant.box"
+  # always use Vagrants insecure key
+  config.ssh.insert_key = false
 
-  config.vm.provider :vmware_fusion do |vb, override|
-    # override.vm.box_url = "http://%s.release.core-os.net/amd64-usr/current/coreos_production_vagrant_vmware_fusion.json" % $update_channel
-    override.vm.box_url = "http://storage.core-os.net/coreos/amd64-usr/#{COREOS_VERSION}/coreos_production_vagrant_vmware_fusion.box"
-  end
+  config.vm.box = "coreos-%s" % $update_channel
+  config.vm.box_version = ">= 647.2.0"
+  config.vm.box_url = "http://%s.release.core-os.net/amd64-usr/current/coreos_production_vagrant.json" % $update_channel
 
-  config.vm.provider :virtualbox do |vb, override|
-    # Use paravirtualized network adapters
-    vb.customize ["modifyvm", :id, "--nictype1", "virtio"]
-    vb.customize ["modifyvm", :id, "--nictype2", "virtio"]
+  ["vmware_fusion", "vmware_workstation"].each do |vmware|
+    config.vm.provider vmware do |v, override|
+      override.vm.box_url = "http://%s.release.core-os.net/amd64-usr/current/coreos_production_vagrant_vmware_fusion.json" % $update_channel
+    end
   end
 
   config.vm.provider :virtualbox do |v|
@@ -71,8 +77,14 @@ Vagrant.configure("2") do |config|
     config.vbguest.auto_update = false
   end
 
+  config.trigger.before :up do
+    if !File.exists?(CLOUD_CONFIG_PATH) || File.readlines(CLOUD_CONFIG_PATH).grep(/#\s*discovery:/).any?
+      raise Vagrant::Errors::VagrantError.new, "Run 'make discovery-url' first to create user-data."
+    end
+  end
+
   (1..$num_instances).each do |i|
-    config.vm.define vm_name = "deis-%d" % i do |config|
+    config.vm.define vm_name = "%s-%02d" % [$instance_name_prefix, i] do |config|
       config.vm.hostname = vm_name
 
       if $enable_serial_logging
@@ -82,11 +94,13 @@ Vagrant.configure("2") do |config|
         serialFile = File.join(logdir, "%s-serial.txt" % vm_name)
         FileUtils.touch(serialFile)
 
-        config.vm.provider :vmware_fusion do |v, override|
-          v.vmx["serial0.present"] = "TRUE"
-          v.vmx["serial0.fileType"] = "file"
-          v.vmx["serial0.fileName"] = serialFile
-          v.vmx["serial0.tryNoRxLoss"] = "FALSE"
+        ["vmware_fusion", "vmware_workstation"].each do |vmware|
+          config.vm.provider vmware do |v, override|
+            v.vmx["serial0.present"] = "TRUE"
+            v.vmx["serial0.fileType"] = "file"
+            v.vmx["serial0.fileName"] = serialFile
+            v.vmx["serial0.tryNoRxLoss"] = "FALSE"
+          end
         end
 
         config.vm.provider :virtualbox do |vb, override|
@@ -99,14 +113,22 @@ Vagrant.configure("2") do |config|
         config.vm.network "forwarded_port", guest: 2375, host: ($expose_docker_tcp + i - 1), auto_correct: true
       end
 
-      config.vm.provider :vmware_fusion do |vb|
-        vb.gui = $vb_gui
+      $forwarded_ports.each do |guest, host|
+        config.vm.network "forwarded_port", guest: guest, host: host, auto_correct: true
+      end
+
+      ["vmware_fusion", "vmware_workstation"].each do |vmware|
+        config.vm.provider vmware do |v|
+          v.gui = vm_gui
+          v.vmx['memsize'] = vm_memory
+          v.vmx['numvcpus'] = vm_cpus
+        end
       end
 
       config.vm.provider :virtualbox do |vb|
-        vb.gui = $vb_gui
-        vb.memory = $vb_memory
-        vb.cpus = $vb_cpus
+        vb.gui = vm_gui
+        vb.memory = vm_memory
+        vb.cpus = vm_cpus
       end
 
       ip = "172.17.8.#{i+99}"
@@ -114,6 +136,13 @@ Vagrant.configure("2") do |config|
 
       # Uncomment below to enable NFS for sharing the host machine into the coreos-vagrant VM.
       #config.vm.synced_folder ".", "/home/core/share", id: "core", :nfs => true, :mount_options => ['nolock,vers=3,udp']
+      $shared_folders.each_with_index do |(host_folder, guest_folder), index|
+        config.vm.synced_folder host_folder.to_s, guest_folder.to_s, id: "core-share%02d" % index, nfs: true, mount_options: ['nolock,vers=3,udp']
+      end
+
+      if $share_home
+        config.vm.synced_folder ENV['HOME'], ENV['HOME'], id: "home", :nfs => true, :mount_options => ['nolock,vers=3,udp']
+      end
 
       if File.exist?(CLOUD_CONFIG_PATH)
         config.vm.provision :file, :source => "#{CLOUD_CONFIG_PATH}", :destination => "/tmp/vagrantfile-user-data"

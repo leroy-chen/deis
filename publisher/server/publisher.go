@@ -1,12 +1,12 @@
 package server
 
 import (
-	"errors"
 	"fmt"
 	"log"
-	"os"
+	"net"
 	"regexp"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/coreos/go-etcd/etcd"
@@ -22,6 +22,24 @@ const (
 type Server struct {
 	DockerClient *docker.Client
 	EtcdClient   *etcd.Client
+
+	host     string
+	logLevel string
+}
+
+var safeMap = struct {
+	sync.RWMutex
+	data map[string]string
+}{data: make(map[string]string)}
+
+// New returns a new instance of Server.
+func New(dockerClient *docker.Client, etcdClient *etcd.Client, host, logLevel string) *Server {
+	return &Server{
+		DockerClient: dockerClient,
+		EtcdClient:   etcdClient,
+		host:         host,
+		logLevel:     logLevel,
+	}
 }
 
 // Listen adds an event listener to the docker client and publishes containers that were started.
@@ -43,6 +61,8 @@ func (s *Server) Listen(ttl time.Duration) {
 					continue
 				}
 				s.publishContainer(container, ttl)
+			} else if event.Status == "stop" {
+				s.removeContainer(event.ID)
 			}
 		}
 	}
@@ -72,13 +92,12 @@ func (s *Server) getContainer(id string) (*docker.APIContainers, error) {
 			return &container, nil
 		}
 	}
-	return nil, errors.New("could not find container")
+	return nil, fmt.Errorf("could not find container with id %v", id)
 }
 
 // publishContainer publishes the docker container to etcd.
 func (s *Server) publishContainer(container *docker.APIContainers, ttl time.Duration) {
 	r := regexp.MustCompile(appNameRegex)
-	host := os.Getenv("HOST")
 	for _, name := range container.Names {
 		// HACK: remove slash from container name
 		// see https://github.com/docker/docker/issues/7519
@@ -88,19 +107,38 @@ func (s *Server) publishContainer(container *docker.APIContainers, ttl time.Dura
 			continue
 		}
 		appName := match[1]
-		keyPath := fmt.Sprintf("/deis/services/%s/%s", appName, containerName)
+		appPath := fmt.Sprintf("%s/%s", appName, containerName)
+		keyPath := fmt.Sprintf("/deis/services/%s", appPath)
 		for _, p := range container.Ports {
+			// lowest port wins (docker sorts the ports)
+			// TODO (bacongobbler): support multiple exposed ports
 			port := strconv.Itoa(int(p.PublicPort))
-			if s.IsPublishableApp(containerName) {
-				s.setEtcd(keyPath, host+":"+port, uint64(ttl.Seconds()))
+			hostAndPort := s.host + ":" + port
+			if s.IsPublishableApp(containerName) && s.IsPortOpen(hostAndPort) {
+				s.setEtcd(keyPath, hostAndPort, uint64(ttl.Seconds()))
+				safeMap.Lock()
+				safeMap.data[container.ID] = appPath
+				safeMap.Unlock()
 			}
-			// TODO: support multiple exposed ports
 			break
 		}
 	}
 }
 
-// isPublishableApp determines if the application should be published to etcd.
+// removeContainer remove a container published by this component
+func (s *Server) removeContainer(event string) {
+	safeMap.RLock()
+	appPath := safeMap.data[event]
+	safeMap.RUnlock()
+
+	if appPath != "" {
+		keyPath := fmt.Sprintf("/deis/services/%s", appPath)
+		log.Printf("stopped %s\n", keyPath)
+		s.removeEtcd(keyPath, false)
+	}
+}
+
+// IsPublishableApp determines if the application should be published to etcd.
 func (s *Server) IsPublishableApp(name string) bool {
 	r := regexp.MustCompile(appNameRegex)
 	match := r.FindStringSubmatch(name)
@@ -113,11 +151,22 @@ func (s *Server) IsPublishableApp(name string) bool {
 		log.Println(err)
 		return false
 	}
+
 	if version >= latestRunningVersion(s.EtcdClient, appName) {
 		return true
-	} else {
-		return false
 	}
+	return false
+}
+
+// IsPortOpen checks if the given port is accepting tcp connections
+func (s *Server) IsPortOpen(hostAndPort string) bool {
+	portOpen := false
+	conn, err := net.Dial("tcp", hostAndPort)
+	if err == nil {
+		portOpen = true
+		defer conn.Close()
+	}
+	return portOpen
 }
 
 // latestRunningVersion retrieves the highest version of the application published
@@ -169,5 +218,17 @@ func (s *Server) setEtcd(key, value string, ttl uint64) {
 	if _, err := s.EtcdClient.Set(key, value, ttl); err != nil {
 		log.Println(err)
 	}
-	log.Println("set", key, "->", value)
+	if s.logLevel == "debug" {
+		log.Println("set", key, "->", value)
+	}
+}
+
+// removeEtcd removes the corresponding etcd key
+func (s *Server) removeEtcd(key string, recursive bool) {
+	if _, err := s.EtcdClient.Delete(key, recursive); err != nil {
+		log.Println(err)
+	}
+	if s.logLevel == "debug" {
+		log.Println("del", key)
+	}
 }

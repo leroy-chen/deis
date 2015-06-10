@@ -1,6 +1,9 @@
-FROM ubuntu-debootstrap:14.04
+FROM alpine:3.1
 
-CMD ["/bin/logger"]
+ENTRYPOINT ["/bin/logger"]
+CMD ["--enable-publish"]
 EXPOSE 514
 
 ADD . /
+
+ENV DEIS_RELEASE 1.8.0-dev

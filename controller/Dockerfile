@@ -1,16 +1,16 @@
-FROM ubuntu-debootstrap:14.04
+FROM alpine:3.1
 
 ENV DEBIAN_FRONTEND noninteractive
 
 # install common packages
-RUN apt-get update && apt-get install -y curl net-tools sudo
+RUN apk add --update-cache curl bash sudo && rm -rf /var/cache/apk/*
 
 # install etcdctl
-RUN curl -sSL -o /usr/local/bin/etcdctl https://s3-us-west-2.amazonaws.com/opdemand/etcdctl-v0.4.6 \
+RUN curl -sSL -o /usr/local/bin/etcdctl https://s3-us-west-2.amazonaws.com/get-deis/etcdctl-v0.4.9 \
     && chmod +x /usr/local/bin/etcdctl
 
 # install confd
-RUN curl -sSL -o /usr/local/bin/confd https://s3-us-west-2.amazonaws.com/opdemand/confd-v0.5.0-json \
+RUN curl -sSL -o /usr/local/bin/confd https://github.com/kelseyhightower/confd/releases/download/v0.9.0/confd-0.9.0-linux-amd64 \
     && chmod +x /usr/local/bin/confd
 
 # define execution environment
@@ -30,3 +30,5 @@ ADD . /app
 
 # Create static resources
 RUN /app/manage.py collectstatic --settings=deis.settings --noinput
+
+ENV DEIS_RELEASE 1.8.0-dev
